@@ -181,3 +181,66 @@ func TestLs(t *testing.T) {
 		t.Errorf("%d rows marked current, want exactly 1", current)
 	}
 }
+
+// TestEveryFaceCarriesTheChecks is the phase-3/phase-5 seam. Phase 3 added a
+// second list beside findings (the db/migrations/seed checks) while phase 5 was
+// rewriting the same two printers to take an io.Writer, in a different
+// worktree. A merge that took one side's function body would drop a whole
+// column of the report from one face and nothing would fail.
+//
+// [database] psql = "false" is the cluster-free way to get a check row: the
+// repo names a database, so doctor asks, and the ask fails.
+func TestEveryFaceCarriesTheChecks(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	write(t, filepath.Join(dir, ".env.example"), "DATABASE_URL=\n")
+	write(t, filepath.Join(dir, ".env"), "DATABASE_URL=postgres://localhost/appdb\n")
+	write(t, filepath.Join(dir, "treehouse.toml"), "[database]\npsql = \"false\"\n")
+
+	for _, face := range [][]string{{"doctor"}, {"doctor", "--ls"}, {"doctor", "--db"}} {
+		t.Run(strings.Join(face, " "), func(t *testing.T) {
+			out, code := runCode(t, dir, face...)
+			if code != 0 {
+				t.Fatalf("exit %d:\n%s", code, out)
+			}
+			if !strings.Contains(out, "db:") {
+				t.Errorf("the db check never reached this face:\n%s", out)
+			}
+		})
+	}
+
+	t.Run("json", func(t *testing.T) {
+		out, _ := runCode(t, dir, "doctor", "--json")
+		var envelope struct {
+			Checks []struct {
+				Name   string `json:"name"`
+				Status string `json:"status"`
+			} `json:"checks"`
+		}
+		if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+			t.Fatalf("not JSON (%v):\n%s", err, out)
+		}
+		if len(envelope.Checks) != 1 || envelope.Checks[0].Name != "db" ||
+			envelope.Checks[0].Status != "skip" {
+			t.Errorf("checks = %+v, want one skipped db row", envelope.Checks)
+		}
+	})
+
+	// The drill-in is the fourth face, and it exists only because printReport
+	// takes a writer. If it ever stops calling the same function, this is what
+	// notices.
+	t.Run("the TUI drill-in", func(t *testing.T) {
+		msg, ok := detailCmd(0, dir)().(detailMsg)
+		if !ok {
+			t.Fatalf("detailCmd returned %T", detailCmd(0, dir)())
+		}
+		if msg.err != nil {
+			t.Fatal(msg.err)
+		}
+		for _, want := range []string{"db:", "expected keys"} {
+			if !strings.Contains(msg.report, want) {
+				t.Errorf("the drill-in is missing %q from doctor's report:\n%s", want, msg.report)
+			}
+		}
+	})
+}
