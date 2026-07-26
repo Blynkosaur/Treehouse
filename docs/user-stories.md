@@ -40,9 +40,9 @@ Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`. (`th` 
 
 | Status | Stories |
 | --- | --- |
-| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **L1** (`new`), **L2** (`ls`), **L3** (`rm`, minus the db/compose teardown that needs Epic A) |
+| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it), **L1** (`new`), **L2** (`ls`), **L3** (`rm`, minus the db/compose teardown that needs Epic A) |
 | 🟡 **Partial** | **C2** (doctor: env drift, `--ls`, `--json`, `--quiet`, exit codes 0/1/2, curated `[env] required` — no services/db/seed/stale checks, no fix lines), **C5** (`init` scaffold — no `.env.example`/compose scan) |
-| ⬜ **Not started** | **L4** (`cd`), **A1–A6** (db-per-worktree), **B1–B3** (triage/why), **C3** (snapshot), **C4** (SessionStart hook), **T1** (TUI) |
+| ⬜ **Not started** | **L4** (`cd`), **A3–A6** (migration state, re-seed, gc, redis), **B1–B3** (triage/why), **C3** (snapshot), **C4** (SessionStart hook), **T1** (TUI) |
 
 Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktrees`/`Ref` (one porcelain parser), `EnvVarsByDir`, `Slug` (collision-safe branch → identifier), `Status` (one worktree, no I/O — the row a TUI renders), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`), and `treehouse.toml` config parsing.
 
@@ -77,11 +77,13 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 **A1. Isolated db on hydrate. 🧱** As a Dev with 3 worktrees, each gets its own Postgres database cloned from the shared dev db (`CREATE DATABASE app_wt_<slug> TEMPLATE app_dev`), so one branch's migration can never break the others.
 
 - AC: near-instant (template copy); branch names with `/` slugged; re-running hydrate reuses the existing clone.
+- ✅ **Done (2026-07-26)**. `check.PlanDB` decides, `internal/pg` does. No template resolvable from main's `.env` → nothing is created and psql is never asked, so a non-Postgres repo leaves no orphans; detached HEAD skips, because a directory name keys the clone to a path. A template somebody is connected to is the COMMON case: hydrate names the sessions and stops, and only `--force-db` ever disconnects anyone.
 - Prior art (verified 2026-07-02): **wtdb** does clone + `DATABASE_URL` rewrite (Postgres-only, creation-time, copies env verbatim — no validation/repair). A1+A2 = table stakes to match; decision: absorb (reimplement, ~30 lines), don't depend.
 
 **A2. Env points at my clone automatically. 🧱** The worktree's `.env` is rewritten (`POSTGRES_DB`/`DATABASE_URL`) to the clone — _after_ canonical repair, so we never point a broken env at a fresh db.
 
 - AC: `doctor` fails loudly if `per_worktree = true` but `.env` targets the shared db.
+- ✅ **Done (2026-07-26)**, minus the doctor check. A fourth derived value beside E2/E3: `DATABASE_URL` is rewritten through `net/url` (a regex loses to `?sslmode=require`, to an `@` in the password, and to a non-default port), `POSTGRES_DB` alongside it. Both keys move together or neither does — half a repoint leaves the app on the shared db while doctor reads green. Set only after the clone is confirmed to exist.
 
 **A3. Migration-state awareness. 🎯** `doctor` says "db exists but 2 migrations behind this branch" (or "ahead of main — expected"), with the fix command.
 

@@ -27,7 +27,7 @@ present, ports and compose project of their own — instead of born broken.
 | Command | What it does |
 | --- | --- |
 | `th new <branch>` | Cuts a worktree beside the main checkout and runs the full hydrate pipeline, then prints a doctor report. `--from <ref>`, `--path <dir>`, `--skip-deps`. |
-| `th hydrate` | Fills this worktree's `.env` files from the main checkout, provisions heavy dep dirs, then writes derived values. `--dry`, `--skip-deps`. |
+| `th hydrate` | Fills this worktree's `.env` files from the main checkout, provisions heavy dep dirs, clones this branch's database, then writes derived values. `--dry`, `--skip-deps`, `--force-db`. |
 | `th doctor` | Reports env drift per service. `--ls` table, `--json`, `--quiet`. |
 | `th ls` | One table: every worktree × branch × env × behind-main × dirty. `--json`. |
 | `th rm <branch>` | Removes a worktree and its branch. Refuses dirty or unpushed work without `--force`, and always refuses the worktree you're standing in. |
