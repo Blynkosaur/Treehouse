@@ -244,3 +244,62 @@ func TestEveryFaceCarriesTheChecks(t *testing.T) {
 		}
 	})
 }
+
+// TestDoctorDBSaysSkipRatherThanNothing is ITEM 2. `th doctor --db` dropped the
+// migrations and seed rows entirely when Postgres could not be reached — the
+// user asked for exactly those two things by name, and got silence. Silence is
+// indistinguishable from "fine" to whoever reads the report next, and it is the
+// same failure `gc --json` was fixed for.
+//
+// [database] psql = "false" is the cluster-free way to make the ask fail.
+func TestDoctorDBSaysSkipRatherThanNothing(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	write(t, filepath.Join(dir, ".env.example"), "DATABASE_URL=\n")
+	write(t, filepath.Join(dir, ".env"), "DATABASE_URL=postgres://localhost/appdb\n")
+	write(t, filepath.Join(dir, "treehouse.toml"),
+		"[database]\npsql = \"false\"\n[migrations]\nstatus = \"true\"\n")
+
+	out, stderr, code := runSplit(t, dir, "doctor", "--db", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d — an unreachable cluster is a skip, not a failure\n%s%s", code, out, stderr)
+	}
+	var envelope struct {
+		Status string `json:"status"`
+		Checks []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+		t.Fatalf("not clean JSON on stdout (%v):\n%s", err, out)
+	}
+	// The envelope must not claim green over three checks nobody could run.
+	if envelope.Status != "skip" {
+		t.Errorf("status = %q, want skip — nothing was verified", envelope.Status)
+	}
+	byName := map[string]string{}
+	for _, c := range envelope.Checks {
+		byName[c.Name] = c.Status
+		if c.Status == "skip" && c.Detail == "" {
+			t.Errorf("%s skipped without saying why", c.Name)
+		}
+	}
+	for _, name := range []string{"db", "migrations", "seed"} {
+		if byName[name] != "skip" {
+			t.Errorf("checks[%s] = %q, want skip — --db asked for this row", name, byName[name])
+		}
+	}
+
+	// And the human face must not print "all clear" over the same three rows.
+	human, _, _ := runSplit(t, dir, "doctor", "--db")
+	if strings.Contains(human, "all clear") {
+		t.Errorf("the report claims all clear over three unrun checks:\n%s", human)
+	}
+	for _, want := range []string{"db:", "migrations:", "seed:", "could not be run"} {
+		if !strings.Contains(human, want) {
+			t.Errorf("the human report is missing %q:\n%s", want, human)
+		}
+	}
+}

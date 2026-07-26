@@ -54,7 +54,8 @@ func runHookSession(cmd *cobra.Command, args []string) error {
 // short, it names the fix rather than explaining it, and it says nothing about
 // the rows that are fine.
 func sessionLines(findings []check.Finding, checks []check.Check, root string) []string {
-	lines := []string{"treehouse — " + filepath.Base(root) + ": environment " + check.Verdict(findings, checks)}
+	verdict := check.Verdict(findings, checks)
+	lines := []string{"treehouse — " + filepath.Base(root) + ": environment " + verdict}
 
 	for _, f := range findings {
 		if len(lines) == 4 {
@@ -68,7 +69,11 @@ func sessionLines(findings []check.Finding, checks []check.Check, root string) [
 		if len(lines) == 7 {
 			break
 		}
-		if c.Status == "fail" || c.Status == "warn" {
+		// skip is here too, and that is the point: a check that could not run is
+		// the one an agent most needs to know it cannot lean on. Telling it only
+		// about the rows that failed leaves "Postgres was never reachable" looking
+		// exactly like "the database is fine".
+		if c.Status != "ok" {
 			line := "  " + c.Name + ": " + c.Detail
 			if c.Fix != "" {
 				line += " — fix: " + c.Fix
@@ -77,7 +82,7 @@ func sessionLines(findings []check.Finding, checks []check.Check, root string) [
 		}
 	}
 
-	if len(lines) == 1 {
+	if verdict == "ok" {
 		lines[0] += " (all clear)"
 	} else {
 		lines = append(lines, "  run `th doctor` for the full report, `th hydrate` to repair")

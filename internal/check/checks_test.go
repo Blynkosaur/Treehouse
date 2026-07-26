@@ -98,7 +98,12 @@ func TestVerdict(t *testing.T) {
 		{"a curated key fails", failed, nil, "fail"},
 		{"a failing check fails an otherwise clean worktree", nil, []Check{{Status: "fail"}}, "fail"},
 		{"a warning check warns", nil, []Check{{Status: "warn"}}, "warn"},
-		{"skip never moves the verdict", nil, []Check{{Status: "skip"}}, "ok"},
+		// The rule this whole pass turns on: nobody asked, so nobody may report
+		// green. Triage already refuses to read a skipped check as corroboration.
+		{"a skipped check is not a passed one", nil, []Check{{Status: "skip"}}, "skip"},
+		{"an ok check does not cover for a skipped one", nil, []Check{{Status: "ok"}, {Status: "skip"}}, "skip"},
+		{"a known problem outranks an unknown one", nil, []Check{{Status: "skip"}, {Status: "warn"}}, "warn"},
+		{"and the order it is folded in cannot change that", nil, []Check{{Status: "warn"}, {Status: "skip"}}, "warn"},
 		{"a failing check outranks env drift", drifted, []Check{{Status: "fail"}}, "fail"},
 		{"an ok check does not rescue a failing env", failed, []Check{{Status: "ok"}}, "fail"},
 	}

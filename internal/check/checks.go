@@ -112,18 +112,32 @@ func (d Doctor) CheckDB(s DBState) Check {
 	return c
 }
 
+// rank orders the four words so a fold can take the worst of them. It is the
+// one place the tiers are written down.
+//
+// skip sits ABOVE ok, and that is the load-bearing part: a check that could not
+// run has not verified anything, so a report made entirely of skips must not
+// come back green. It sits below warn because a known problem is more
+// actionable than an unknown one. Triage already refuses to read a skipped
+// check as corroboration; this is the same rule on the doctor side.
+var rank = map[string]int{"ok": 0, skip: 1, "warn": 2, "fail": 3}
+
+// worse returns whichever of the two words the reader needs to hear.
+func worse(a, b string) string {
+	if rank[b] > rank[a] {
+		return b
+	}
+	return a
+}
+
 // Verdict folds env findings and checks into the one word the exit code, the
 // --json envelope and the ls column all agree on. Inferred drift warns; a
-// curated required key and a worktree pointed at the shared database fail.
+// curated required key and a worktree pointed at the shared database fail; a
+// check nobody could run comes back skip rather than quietly ok.
 func Verdict(findings []Finding, checks []Check) string {
 	status := EnvStatus(findings)
 	for _, c := range checks {
-		switch {
-		case c.Status == "fail":
-			return "fail"
-		case c.Status == "warn" && status == "ok":
-			status = "warn"
-		}
+		status = worse(status, c.Status)
 	}
 	return status
 }

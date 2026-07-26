@@ -108,8 +108,7 @@ func dbChecks(d check.Doctor, root, mainRoot string, wt, source check.Worktree, 
 	}
 	names, err := pg.Databases()
 	if err != nil {
-		return []check.Check{{Name: "db", Status: "skip",
-			Detail: "postgres is not reachable: " + oneLine(err)}}
+		return unreachable("postgres is not reachable: " + oneLine(err))
 	}
 
 	refs, _ := check.Worktrees(root)
@@ -123,6 +122,23 @@ func dbChecks(d check.Doctor, root, mainRoot string, wt, source check.Worktree, 
 	}
 	checks := []check.Check{d.CheckDB(state)}
 	return append(checks, dataChecks(d, root, mainBranch(refs), wt, state.Plan, cfg)...)
+}
+
+// unreachable is what doctor reports when it could not reach the cluster at
+// all. Every row a caller ASKED FOR still appears, saying it was not checked
+// and why — the migration and seed rows used to be dropped entirely here, which
+// answered `th doctor --db` with silence on the two things the flag exists to
+// report. Silence is indistinguishable from "fine" to whoever reads it next,
+// and running the project's migration-status command against a dead cluster
+// would be worse: it exits non-zero, which this reads as "migrations pending".
+func unreachable(why string) []check.Check {
+	checks := []check.Check{{Name: "db", Status: "skip", Detail: why}}
+	if !doctorDB {
+		return checks
+	}
+	return append(checks,
+		check.Check{Name: "migrations", Status: "skip", Detail: "not checked — " + why},
+		check.Check{Name: "seed", Status: "skip", Detail: "not checked — " + why})
 }
 
 // dataChecks runs the PROJECT's own tooling, and only because a human asked:
@@ -342,6 +358,7 @@ func printReport(w io.Writer, findings []check.Finding, checks []check.Check, ro
 	}
 
 	printChecks(w, checks)
+	skipped := 0
 	for _, c := range checks {
 		switch c.Status {
 		case "fail":
@@ -349,12 +366,18 @@ func printReport(w io.Writer, findings []check.Finding, checks []check.Check, ro
 			problems++
 		case "warn":
 			problems++
+		case "skip":
+			skipped++
 		}
 	}
 
 	switch {
-	case problems == 0:
+	case problems == 0 && skipped == 0:
 		fmt.Fprintln(w, "\nall clear")
+	case problems == 0:
+		// "all clear" over a report that could not run half its checks is the
+		// exact lie this whole pass exists to remove.
+		fmt.Fprintf(w, "\nno problems found, but %d check(s) could not be run — see the • lines above\n", skipped)
 	case failed > 0:
 		fmt.Fprintf(w, "\n%d problem(s), %d of them failures\n", problems, failed)
 	default:

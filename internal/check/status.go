@@ -39,16 +39,7 @@ type Status struct {
 func Fleet(rows []Status) string {
 	s := "ok"
 	for _, r := range rows {
-		switch r.Status {
-		case "fail":
-			return "fail"
-		case "warn":
-			s = "warn"
-		case skip:
-			if s == "ok" {
-				s = skip
-			}
-		}
+		s = worse(s, r.Status)
 	}
 	return s
 }
