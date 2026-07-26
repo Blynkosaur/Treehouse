@@ -51,6 +51,48 @@ Plans append-only repairs for **missing** keys, valued from the source worktree.
 | 4 | `.env` absent entirely → `Create` repair (vs append) | `TestPlanHydrate` |
 | 5 | Source lacks the service dir → every key `Unsourced` | `TestPlanHydrateNoSourceService` |
 
+## `envfile.Set(path, vars)` — `internal/envfile/envfile.go`
+
+Forces keys to a value: rewrites every matching line, appends the rest. A whole-file
+rewrite, so it writes to a temp file and renames — `Append` can only damage the tail,
+`Set` could lose an env a human hand-filled.
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | Existing key rewritten in place; comments, order and other keys untouched | `TestSet/overwrite_preserves_comments_and_key_order` |
+| 2 | **Every** duplicate declaration is rewritten, not just the last (which one wins is the loader's business) | `TestSet/every_duplicate_is_rewritten` |
+| 3 | `# PORT=1` is not a match — the rule is `Parse`'s, character for character | `TestSet/commented-out_key_is_not_a_match` |
+| 4 | `export PORT=3000` is not a match either: `Parse` reads that key as `export PORT` | `TestSet/export_prefix_is_not_a_match_(Parse_reads_it_as_'export_PORT')` |
+| 5 | New keys appended sorted, with **no** `Marker` block (a set is an override, not a hydrate) | `TestSet/absent_file_is_created` |
+| 6 | Absent file created 0644; existing file's mode preserved | `TestSet/absent_file_is_created`, `TestSetPreservesMode` |
+| 7 | No trailing newline and CRLF both survive; output always ends in `\n` | `TestSet/no_trailing_newline`, `TestSet/CRLF_line_endings_survive` |
+| 8 | A second identical call produces a byte-identical file | asserted in every `TestSet` case |
+| 9 | Values containing whitespace, `#` or quotes are quoted so `Parse` round-trips | `TestSet/value_needing_quotes_is_quoted` |
+
+## `envfile.LoadPath(path)` — `internal/envfile/envfile.go`
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | A file `Parse` can't scan (line over `bufio.Scanner`'s 64KB cap) → non-nil error, never a silent empty `File` | `TestLoadPathReportsParseError` |
+
+## `Slug(branch)` + `PlanDerive` — `internal/check/derive.go`
+
+The derived per-worktree identity: a private compose project (E2) and a private set
+of ports (E3). Pure — cmd gathers the fleet and passes it in.
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | `Slug` appends a hash when the mapping was lossy or truncated, so `feat/a-b` ≠ `feat-a-b` | `TestSlugCollision` |
+| 2 | `Slug` output is a legal compose **and** Postgres identifier, ≤ 47 bytes | `TestSlugShape` |
+| 3 | E2: every dir holding a compose file gets `COMPOSE_PROJECT_NAME=<app>_<slug>` | `TestPlanDeriveCompose` |
+| 4 | E2: repo with no compose file → the key is written nowhere | `TestPlanDeriveNoComposeNoKey` |
+| 5 | E3: port keys are `PORT`/`*_PORT` in **main's** `.env` whose value parses as 1024–65535 | `TestPlanDerivePorts` |
+| 6 | E3: one offset shifts every service (inter-service spacing preserved) and the whole set is disjoint from every neighbour's declared ports | `TestPlanDerivePorts` |
+| 7 | E3: same branch → same ports; a different branch → different ports | `TestPlanDeriveStable` |
+| 8 | E3: no free offset → a `Repair` carrying a `Skip` reason, never an error (hydrate never fails over a port) | `TestPlanDerivePortsExhausted` |
+| 9 | Derived repairs are `Overwrite` (rewrite existing lines), not append | `TestPlanDeriveCompose` |
+| 10 | End to end: `th new` derives into a `.env` phase 1 only just created | `TestNew/born_ready` |
+
 ## `make` command — `cmd/make.go`
 
 Generates `.env.example` from each service's `.env`, keys copied, values blanked.
@@ -66,4 +108,8 @@ Generates `.env.example` from each service's `.env`, keys copied, values blanked
 
 Deliberate non-goals (documented in code): present-but-empty keys are doctor's
 nag but not hydrated (v2, needs in-place edits); `make` is create-only and won't
-sync new keys into an existing `.env.example` (v2 `--sync`).
+sync new keys into an existing `.env.example` (v2 `--sync`); E3 governs
+**app-process ports only** — a compose file's `ports:` host mapping is not
+rewritten; port detection is by key name (`PORT`, `*_PORT`), so `SERVER_ADDR=:3000`
+is invisible; "free" means *not declared in a sibling `.env`*, not *unbound on the
+host* — a live probe would be racy, and determinism is what E3 exists for.

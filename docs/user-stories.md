@@ -34,19 +34,19 @@ Documented worktree pains (research + Bryan's own usage history) and the story t
 
 ---
 
-## Build status — 2026-07-20
+## Build status — 2026-07-26
 
-Commands shipped: `doctor`, `hydrate`, `make`, `init`. (`th` is an alias for the `treehouse` binary.)
+Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`. (`th` is an alias for the `treehouse` binary.)
 
 | Status | Stories |
 | --- | --- |
-| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`) |
-| 🟡 **Partial** | **C2** (doctor: env drift + `--ls` only — no services/db/seed/stale, no `--json`/`--quiet`/exit codes), **C5** (`init` scaffold — no `.env.example`/compose scan) |
-| ⬜ **Not started** | **L1–L4** (new/ls/rm/cd), **A1–A6** (db-per-worktree), **B1–B3** (triage/why), **C3** (snapshot), **C4** (SessionStart hook), **E2** (compose namespace), **E3** (port offsets), **T1** (TUI) |
+| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **L1** (`new`), **L2** (`ls`), **L3** (`rm`, minus the db/compose teardown that needs Epic A) |
+| 🟡 **Partial** | **C2** (doctor: env drift, `--ls`, `--json`, `--quiet`, exit codes 0/1/2, curated `[env] required` — no services/db/seed/stale checks, no fix lines), **C5** (`init` scaffold — no `.env.example`/compose scan) |
+| ⬜ **Not started** | **L4** (`cd`), **A1–A6** (db-per-worktree), **B1–B3** (triage/why), **C3** (snapshot), **C4** (SessionStart hook), **T1** (TUI) |
 
-Foundations in place that unblock the above: `Discover`, `MainWorktree`, `EnvVarsByDir` (worktree/env model), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`), and `treehouse.toml` config parsing.
+Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktrees`/`Ref` (one porcelain parser), `EnvVarsByDir`, `Slug` (collision-safe branch → identifier), `Status` (one worktree, no I/O — the row a TUI renders), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`), and `treehouse.toml` config parsing.
 
-**Pain coverage so far:** pain 1 (missing `.env`) via C1/hydrate; pains 2 & 9 (deps reinstall + disk) via E1. Pains 3–8, 10–13 still open.
+**Pain coverage so far:** pain 1 (missing `.env`) via C1/hydrate; pains 2 & 9 (deps reinstall + disk) via E1; pain 4 (port fights) via E3; pain 5 (compose collisions) via E2; pain 6 (stale base) via L1's fetch-then-cut; pain 7 (worktree confusion) via L2; pain 8 (cruft) partly via L3. Pains 3, 10–13 still open.
 
 ---
 
@@ -55,14 +55,18 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `EnvVar
 **L1. `treehouse new <branch>` — born ready.** As a Dev, one command gives me a worktree that is immediately workable: fetches origin, cuts the worktree from _fresh_ base (kills pain 6 at the root), then runs the full hydrate pipeline — env fill from canonical, db clone + `DATABASE_URL` pointing, CoW deps, compose/port namespacing, seed steps — and finishes with a doctor report.
 
 - AC: single command, ends with green doctor or a clear list of what's still red; `--from <ref>` overrides base; helpful error when the branch is already checked out elsewhere (pain 7); optional `open` hook (editor/agent command) after green.
+- ✅ **Done (2026-07-26).** `th new <branch>` places the worktree as a **sibling** of the main checkout (inside would poison `Discover`/`findDepDirs`), resolves local → remote-tracking → new-branch-from-`origin/HEAD`, warns instead of failing when `git fetch` can't reach origin, then runs the same `hydrate` pipeline and prints the doctor report. Dep failures are red lines, not aborts. Still open: the db clone (Epic A), seed steps, and the `open` hook.
 
 **L2. `treehouse ls` — one table, everything.** As a Dev with 4 worktrees, I see worktree × branch × {env, services, db, seed, behind-main, dirty} at a glance, so I spot the broken one before assigning an agent to it.
 
 - AC: `--json` for tooling; current worktree highlighted; state columns reuse doctor (no second implementation). (Absorbs the old "fleet view" epic. `wt`/`wtdb status` show git/db columns only — the state columns are the differentiator.)
+- ✅ **Done (2026-07-26).** `th ls` shows worktree × branch × env × behind-main × dirty, current row marked, `--json` in the same envelope doctor uses. The row is computed by `check.Doctor.Status` — one worktree, no I/O — so T1's TUI streams rows instead of reimplementing them. Services/db/seed columns arrive with their epics.
 
 **L3. `treehouse rm <branch>` — remove without corpses.** As a Dev, removing a worktree also drops its db clone and its compose project, so nothing accumulates.
 
-- AC: refuses when dirty/unpushed unless `--force`; `treehouse rm --merged` sweeps every worktree whose branch is merged (pain 8, agent-corpse cleanup).
+- AC: refuses when dirty/unpushed unless `--force`; ~~`treehouse rm --merged` sweeps every worktree whose branch is merged~~.
+- ✅ **Done (2026-07-26)**, minus the corpses Epic A will create. `th rm <branch>` refuses dirty or not-on-any-remote work without `--force`, and **flatly refuses the worktree you're standing in** even with it. Db clone and compose teardown land with A1/A5.
+- **Cut: `--merged`.** `git branch --merged` cannot see a squash-merged branch, so the sweep would silently skip exactly the branches most teams produce. A cleanup you can't trust is worse than none; `th rm` stays explicit.
 
 **L4. Shell niceties ➕.** `treehouse cd <branch>` jump with completion, like wtp.
 
@@ -112,7 +116,7 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `EnvVar
 ## Epic C — Core doctor/hydrator 🟡 (partial — status corrected 2026-07-20 to match code)
 
 **C1.** `hydrate` fills `.env` from canonical without overwriting local values. ✅ **Done** — append-only writes from the main worktree; no backup needed since it never overwrites (present-but-empty keys deferred to v2).
-**C2.** `doctor` reports missing/empty required keys, dead services, unseeded data, stale base — each with a fix line; `--json`, `--quiet`, exit codes. 🟡 **Partial** — env-key drift + `--ls` table shipped (and it now falls back to the main worktree's `.env` when no `.env.example`). Still missing: dead-service/unseeded/stale-base checks, fix lines, `--json`, `--quiet`, non-zero exit codes.
+**C2.** `doctor` reports missing/empty required keys, dead services, unseeded data, stale base — each with a fix line; `--json`, `--quiet`, exit codes. 🟡 **Partial** — env-key drift, `--ls` table, main-worktree fallback, `--json` (an object envelope: `schema`/`root`/`status`/`findings`), `--quiet`, and exit codes 0/1/2 shipped, with `[env] required` in `treehouse.toml` as the only thing that fires the FAIL tier. Still missing: dead-service/unseeded/stale-base checks and fix lines.
 **C3.** `snapshot` captures the current working `.env` as canonical. ⬜ **Not started** — no `snapshot` command exists.
 **C4.** `SessionStart` hook: agent starts with env state in context. ⬜ **Not started** — no treehouse hook exists.
 **C5.** `init` scans `.env.example` + docker-compose and generates `treehouse.toml`. 🟡 **Partial** — `init` writes a commented `treehouse.toml` scaffold; it does **not** yet scan `.env.example`/docker-compose to pre-populate rules.
@@ -128,9 +132,9 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `EnvVar
 - Evidence: 5 × 2GB node_modules = 10GB; ~10GB burned in 20 min of agent worktrees (reported).
 - Shipped as: `internal/check/deps.go` (planner), `internal/deps` (CoW doers), `internal/config` (toml), wired into `cmd/hydrate.go`. Unit + E2E tested.
 
-**E2. Compose namespace per worktree.** `hydrate` writes `COMPOSE_PROJECT_NAME=<app>_<slug>` into each worktree's `.env` — containers/networks/volumes never clobber across worktrees.
+**E2. Compose namespace per worktree.** ✅ **Done (2026-07-26).** `hydrate` writes `COMPOSE_PROJECT_NAME=<app>_<slug>` into the `.env` of every directory that actually holds a compose file — a repo with no compose file gets no key anywhere. `<app>` is main's own `COMPOSE_PROJECT_NAME` if it has one, else Compose's default rule (the main checkout's directory name).
 
-**E3. Cheap port offsets.** `hydrate` assigns a deterministic per-worktree port offset into `.env` (`PORT=3001`, `3002`…). Full proxy/subdomain routing stays punted to portree.
+**E3. Cheap port offsets.** ✅ **Done (2026-07-26).** `hydrate` shifts every `PORT`/`*_PORT` key main declares by one offset derived from the branch slug, checked against the ports every sibling worktree declares. One offset for all services, so inter-service spacing survives; same branch → same ports, because the registry is the sibling `.env` files and there is no state file to garbage-collect. Ceilings, on purpose: detection is by key name (`SERVER_ADDR=:3000` is invisible), "free" means undeclared rather than unbound on the host, and a compose file's `ports:` host mapping is **not** rewritten — parameterize it. Full proxy/subdomain routing stays punted to portree.
 
 ---
 
