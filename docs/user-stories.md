@@ -36,17 +36,18 @@ Documented worktree pains (research + Bryan's own usage history) and the story t
 
 ## Build status — 2026-07-26
 
-Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`, `gc`, `seed`. (`th` is an alias for the `treehouse` binary.)
+Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`, `gc`, `seed`, `triage`, `hook session`. (`th` is an alias for the `treehouse` binary.)
 
 | Status | Stories |
 | --- | --- |
-| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **L1** (`new`), **L2** (`ls`), **L3** (`rm`, teardown included) |
-| 🟡 **Partial** | **C2** (doctor: env drift, db/migration/seed checks, `--ls`, `--json` schema 2, `--quiet`, exit codes 0/1/2, curated `[env] required` — no dead-service or stale-base checks), **A3** (migration state, with `diverged` cut from the AC — see below), **C5** (`init` scaffold — no `.env.example`/compose scan) |
-| ⬜ **Not started** | **L4** (`cd`), **A6** (redis), **B1–B3** (triage/why), **C3** (snapshot), **C4** (SessionStart hook), **T1** (TUI) |
+| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **L1** (`new`), **L2** (`ls`), **L3** (`rm`, teardown included), **B1** (`triage`, three modes) |
+| 🟡 **Partial** | **C2** (doctor: env drift, db/migration/seed checks, `--ls`, `--json` schema 2, `--quiet`, exit codes 0/1/2, curated `[env] required` — no dead-service or stale-base checks), **A3** (migration state, with `diverged` cut from the AC — see below), **C5** (`init` scaffold — no `.env.example`/compose scan), **B2** + **C4** (both hooks built and tested; the Claude Code wiring is unverified — see B2) |
+| ⬜ **Not started** | **L4** (`cd`), **A6** (redis), **C3** (snapshot), **T1** (TUI) |
+| ✂️ **Deferred** | **B3** (`why` — needs the one state file this project has refused everywhere else; see B3) |
 
-Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktrees`/`Ref` (one porcelain parser), `EnvVarsByDir`, `Slug` (collision-safe branch → identifier), `Status` (one worktree, no I/O — the row a TUI renders), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`/`DBPlan`/`DBDrop`), `Check` (the non-env verdict beside `Finding`), and `treehouse.toml` config parsing with one generic name-keyed `Merge`.
+Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktrees`/`Ref` (one porcelain parser), `EnvVarsByDir`, `Slug` (collision-safe branch → identifier), `Status` (one worktree, no I/O — the row a TUI renders), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`/`DBPlan`/`DBDrop`), `Check` (the non-env verdict beside `Finding`), `Triage` (the same correlation, pure), and `treehouse.toml` config parsing with one generic name-keyed `Merge` — now serving the three lists it was made generic for (`[[deps]]`, `[[seed]]`, `[[signature]]`).
 
-**Pain coverage so far:** pain 1 (missing `.env`) via C1/hydrate; pains 2 & 9 (deps reinstall + disk) via E1; **pain 3 (shared database, colliding migrations) via A1/A2/A3/A4**; pain 4 (port fights) via E3; pain 5 (compose collisions) via E2; pain 6 (stale base) via L1's fetch-then-cut; pain 7 (worktree confusion) via L2; **pain 8 (cruft) via L3 + A5**. Pains 10–13 still open.
+**Pain coverage so far:** pain 1 (missing `.env`) via C1/hydrate; pains 2 & 9 (deps reinstall + disk) via E1; **pain 3 (shared database, colliding migrations) via A1/A2/A3/A4**; pain 4 (port fights) via E3; pain 5 (compose collisions) via E2; pain 6 (stale base) via L1's fetch-then-cut; pain 7 (worktree confusion) via L2; **pain 8 (cruft) via L3 + A5**; pain 13's agent half via B1/B2 (an agent no longer debugs phantom code bugs caused by a broken environment). Pains 10–12 still open.
 
 ---
 
@@ -110,14 +111,34 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 **B1. Structured verdict on failure.** As an Agent, when a command fails, `treehouse triage -- <cmd>` correlates the failure output with doctor state and returns `{cause: environment|code|unknown, evidence, fixes}` — so I repair the environment instead of debugging phantom code bugs.
 
 - AC: default signature map (`connection refused :PORT` → service; `relation does not exist` → migration/seed; `KeyError`/undefined env → env); repo config adds custom signatures.
+- ✅ **Done (2026-07-26).** `check.Triage` is pure — output in, doctor's own `[]Finding` and `[]Check` in, verdict out — so the whole table below is tested from struct literals. Three invocation modes share it: `th triage -- <cmd>` (transparent wrapper), `--stdin` (pipe), `--hook` (B2). `treehouse.toml [[signature]]` extends the built-ins through the same name-keyed `Merge` that `[[deps]]` and `[[seed]]` use.
+
+  **The correlation is the story, not the regex.** A pattern that matches proves the output _looks_ environmental; only doctor can say whether the environment is actually broken.
+
+  | signature | doctor for that area | verdict |
+  | --- | --- | --- |
+  | matched | red | `environment` — evidence and fixes from both |
+  | matched | green | `unknown`, evidence names the contradiction |
+  | none | red somewhere | `unknown`, red row offered as possibly related |
+  | none | green | `code` |
+
+  Row 2 is the entire value of correlating. A confident wrong "it's your environment" sends an agent to reinstall Postgres for twenty minutes over a typo in its own code — strictly worse than no verdict at all. `skip` and _absent_ checks are treated as unknown, never as green, for the same reason: "we never asked" must not read as "we verified it".
+
+- **Honest gap: `connection refused` cannot reach `environment`.** `Needs: env` maps onto `CheckEnv` and `db`/`migration` map onto the `Check` list — all real. **`service` maps onto nothing**, because C2's dead-service check does not exist. So the first default signature degrades to regex-only evidence with cause `unknown`, and says so in the evidence line. Not faked (dialling the port from triage would be a new check smuggled in through the back door); marked `ponytail:` in `internal/check/triage.go`, and it fills itself in when C2's service check lands.
+- **Exit codes:** the wrapper passes the **wrapped command's code through verbatim** — `time`/`env`/`nice` all do, and `th triage -- pytest` has to keep failing a Makefile — so its verdict goes to **stderr**, where it cannot corrupt a piped stdout. `--stdin`/`--hook` use the existing 0/2. No fourth code was added: `environment` is a verdict about the worktree, which is what doctor's 2 already means.
 
 **B2. Automatic verdict injection.** A Claude Code `PostToolUse` hook feeds the triage verdict to the agent whenever a Bash command fails — no more agents doing "a whole bunch of nothing" for 20 minutes because Redis was down.
 
 - AC: copy-paste hook in README; quiet output ≤ 10 lines; **silent when verdict is `code`** (don't spam the agent).
+- 🟡 **Code done, wiring unverified (2026-07-26).** `th triage --hook` reads the payload, renders ≤10 lines of `additionalContext`, and ships with a `PostToolUse` fixture (`cmd/testdata/posttooluse.json`) so it is testable without Claude Code in the loop.
+- **The AC as written is not implementable, and the design absorbs it.** "Whenever a Bash command fails" assumes the hook can tell. It cannot: a Bash `tool_response` carries only `stdout`, `stderr` and `interrupted` — **no exit code**. (Verified against first-party shipping hook code, which infers failure by regex over the output text for exactly this reason. Same source corrected the stdin field: it is `tool_response`, not the `tool_result` a local SKILL.md claims — the wrong name ships a hook that silently never fires.) The resolution is that **the signature map IS the failure detector**: run on every Bash `PostToolUse`, exit 0 in silence when nothing matches. That collapses the AC's "silent when the verdict is `code`" into the same code path, with no extra machinery — a passing command matches nothing, and neither does a code bug.
+- **A hook never re-runs the command.** It would re-run `git push`, `rm`, a migration — and it is unnecessary, since the output is already in the payload. There is a test asserting it.
+- **Unverified, in the README and worth checking before trusting it:** whether `PostToolUse` fires at all when a Bash call _errors_ (if not, B2 is dead as designed and must move to a `UserPromptSubmit` shape — **check this first**); whether `additionalContext` reaches the model or only the transcript; the exact `.claude/settings.json` nesting; and whether exit 2 is read as added context or as a blocked tool call. The README carries the block, marked unverified, plus the verification recipe.
 
 **B3. Human one-liner.** `treehouse why` answers in one line what changed since everything was last green.
 
 - AC: state journal records last-green per check; `why` diffs current vs last-green.
+- ⬜ **Deferred (2026-07-26) — cut from phase 4, not from the product.** It needs a last-green state journal, and that is the one piece of new persistence this project has refused everywhere else on principle: the port registry is the sibling `.env` files, the seed marker is a table inside the database that gets dropped with it. Both were designed specifically so there is nothing for `th gc` to chase. A journal reintroduces exactly that — a file that goes stale, that lies after a manual fix, and that nothing cleans up. Revisit only with an answer for where it lives and who deletes it.
 
 ---
 
@@ -128,7 +149,7 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 
   **Why `Check` is a sibling of `Finding`, not a wider `Finding`:** a `Finding` is shaped around env keys (`Missing`/`Empty`/`NoEnv`/`Keys`). Database, migration and seed results share none of that shape, and widening the struct would give every env row a pile of nil db fields to carry and every consumer a pile to skip. So the envelope carries two flat lists — `{schema: 2, root, status, findings: […], checks: […]}` — each with its own shape. The version bumped because that is what the field is for: a consumer reading `findings` for the whole story is wrong now, and should be told at the envelope rather than by silently missing the database row.
 **C3.** `snapshot` captures the current working `.env` as canonical. ⬜ **Not started** — no `snapshot` command exists.
-**C4.** `SessionStart` hook: agent starts with env state in context. ⬜ **Not started** — no treehouse hook exists.
+**C4.** `SessionStart` hook: agent starts with env state in context. 🟡 **Code done, wiring unverified** — `th hook session` emits this worktree's env and database state as `additionalContext`, capped at eight lines because it is prepended to a context window, not printed as a report. A green worktree costs one line plus a pointer to `th triage`. It deliberately does **not** filter on the `source` value (`startup`/`resume`/`clear`/`compact`): which of those are worth spending context on is unverified, and the settings.json matcher is where a human can see and change that decision. See B2 for the rest of the unverified list.
 **C5.** `init` scans `.env.example` + docker-compose and generates `treehouse.toml`. 🟡 **Partial** — `init` writes a commented `treehouse.toml` scaffold; it does **not** yet scan `.env.example`/docker-compose to pre-populate rules.
 
 **Also shipped, not in the original stories:** `make` — generates `.env.example` from each service's `.env` (values blanked), with a main-worktree fallback for empty worktrees.

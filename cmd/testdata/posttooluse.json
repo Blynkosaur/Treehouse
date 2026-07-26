@@ -1,0 +1,18 @@
+{
+  "session_id": "f1a3b2c4-0000-4000-8000-000000000001",
+  "transcript_path": "/Users/you/.claude/projects/-Users-you-repo/f1a3b2c4.jsonl",
+  "cwd": "/Users/you/repo",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "pytest -q tests/test_login.py",
+    "description": "Run the login tests"
+  },
+  "tool_response": {
+    "stdout": "collected 3 items\n\ntests/test_login.py F..\n",
+    "stderr": "Traceback (most recent call last):\n  File \"app/settings.py\", line 12, in <module>\n    DATABASE_URL = os.environ['DATABASE_URL']\nKeyError: 'DATABASE_URL'\n",
+    "interrupted": false,
+    "isImage": false
+  }
+}

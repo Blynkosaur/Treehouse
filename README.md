@@ -30,6 +30,8 @@ present, ports and compose project of their own — instead of born broken.
 | `th hydrate` | Fills this worktree's `.env` files from the main checkout, provisions heavy dep dirs, clones this branch's database, then writes derived values. `--dry`, `--skip-deps`, `--force-db`. |
 | `th doctor` | Reports env drift per service, plus whether this worktree has its own database and is pointed at it. `--db` adds migration and seed state. `--ls` table, `--json`, `--quiet`. |
 | `th ls` | One table: every worktree × branch × env × db × behind-main × dirty. `--json`. |
+| `th triage -- <cmd>` | Runs the command, streams it, and afterwards says whether the failure was the environment or the code. `--stdin`, `--hook`. |
+| `th hook session` | Claude Code `SessionStart`: hands the agent this worktree's env and database state. |
 | `th rm <branch>` | Removes a worktree, its branch, and its database clone. Refuses dirty or unpushed work without `--force`, and always refuses the worktree you're standing in. |
 | `th gc` | Lists the database clones whose worktrees are gone and drops them after confirmation. `-y`, `--json`. |
 | `th seed <name>` | Runs a named `[[seed]]` dataset against this worktree's own database. |
@@ -47,6 +49,10 @@ red but don't abort; env and git failures do.
 | 0 | healthy, or warnings only |
 | 1 | treehouse itself failed (usage, git, IO) |
 | 2 | a curated required key is missing or empty, or this worktree's `.env` targets the shared database while its own clone exists |
+
+One documented exception: `th triage -- <cmd>` passes the **wrapped command's**
+exit code through verbatim, because a wrapper that changes it is a wrapper you
+cannot put in front of anything. See [Triage](#triage-environment-or-code).
 
 Requirements inferred from `.env.example` are warnings. Failures come only from a
 human-curated list:
@@ -120,6 +126,150 @@ It does **not** claim "diverged"; see A3 in [docs/user-stories.md](docs/user-sto
 that worktree's own database — so it rides the template copy (a new clone
 inherits main's datasets), it is dropped with the database, and there is no state
 file to keep in sync.
+
+## Triage: environment or code?
+
+An agent that reads `connection refused` and starts debugging its own code burns
+twenty minutes on nothing. `th triage` correlates the failure output with this
+worktree's doctor state and says which it was.
+
+```
+th triage -- pytest -q
+…pytest's own output, live, unchanged…
+th triage: environment (matched missing-env)
+  KeyError: 'DATABASE_URL'
+  a required environment variable is unset
+  doctor agrees: env drift in /repo/api: missing DATABASE_URL
+  fix: th hydrate
+```
+
+**The correlation is the point, not the regex.** A pattern that matches proves
+the output *looks* environmental; only doctor can say whether the environment is
+actually broken.
+
+| signature | doctor for that area | verdict |
+| --- | --- | --- |
+| matched | red | `environment` — evidence and fixes from both |
+| matched | green | `unknown`, and the evidence names the contradiction |
+| none | red somewhere | `unknown`, with the red row offered as possibly related |
+| none | green | `code` |
+
+Row two is why this is not `grep`. A confident wrong "it's your environment"
+sends an agent to reinstall Postgres over a typo in its own code, which is
+strictly worse than saying nothing.
+
+**A known gap:** `connection refused` needs a service check, and treehouse does
+not have one yet (C2). So that signature can never be corroborated and always
+lands on `unknown` with regex-only evidence, which the verdict says out loud.
+It is not faked, and when the dead-service check lands it starts reaching
+`environment` on its own.
+
+### The three modes, and their exit codes
+
+| Mode | Output | Exit code |
+| --- | --- | --- |
+| `th triage -- <cmd>` | the command's own streams, untouched; verdict on **stderr**, ≤10 lines | **the wrapped command's, verbatim** |
+| `th triage --stdin` | verdict JSON on stdout | 0, or **2** for `environment` |
+| `th triage --hook` | `hookSpecificOutput` JSON on stdout | 0, or **2** for `environment` |
+
+The wrapper is transparent on purpose — `time`, `env` and `nice` all pass the
+code through, and `th triage -- pytest` has to keep failing a Makefile. That is
+why the verdict goes to stderr: stdout belongs to the wrapped command, and a
+verdict printed into it would corrupt every pipeline. (127 if the command could
+not be started at all; 128 if it was killed by a signal.)
+
+There is no fourth exit code. `environment` is a verdict about the worktree,
+which is exactly what doctor's 2 already means.
+
+### Your own signatures
+
+```toml
+# treehouse.toml, committed
+[[signature]]
+name = "kafka-down"
+match = "NoBrokersAvailable"          # regex, matched line by line
+cause = "kafka is not reachable"
+fix = "docker compose up -d kafka"
+needs = "service"                     # env | db | migration | service
+```
+
+`needs` names the doctor fact that must agree before triage says `environment`.
+Entries merge by name, like `[[deps]]` and `[[seed]]`: reuse a built-in's name
+to replace it, use a new one to add.
+
+## Claude Code hooks (UNVERIFIED — read this before pasting)
+
+Two hooks: one hands an agent the worktree's state at session start, the other
+explains a failing Bash command while it is still on screen.
+
+**The code is tested; the wiring is not.** The block below was written from
+first-party hook source, not from a run that was watched end to end. Four things
+are unconfirmed, and the first one decides whether the `PostToolUse` half works
+at all:
+
+1. **Does `PostToolUse` fire when a Bash tool call *errors*?** If it only fires
+   on success, the failure hook is dead as designed and has to move to a
+   `UserPromptSubmit` shape. Check this first.
+2. Does `additionalContext` from `PostToolUse` actually reach the model, or only
+   the transcript?
+3. The exact `.claude/settings.json` nesting below.
+4. Which `SessionStart` `source` values should trigger the session hook —
+   probably `startup` only, but `resume`/`clear`/`compact` are untested. That is
+   why `th hook session` does not filter by source itself: the matcher below is
+   where you decide, and you can see it.
+
+One more thing that IS verified and worth knowing: **a Bash `tool_response`
+carries no exit code** — only `stdout`, `stderr` and `interrupted`. There is no
+"did it fail" to branch on, so the signature map *is* the failure detector. The
+hook runs after every Bash call and exits 0 in silence when nothing matches,
+which is also what makes it silent when the verdict is `code`. It never re-runs
+the command: the output is already in the payload, and re-running would re-run
+your `git push`.
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [{ "type": "command", "command": "th hook session" }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "th triage --hook" }]
+      }
+    ]
+  }
+}
+```
+
+### Verify it yourself, in three steps
+
+```sh
+# 1. the payload path works, with no Claude Code in the loop. Run it from your
+#    own repo — triage answers about the worktree you are standing in.
+printf '%s' '{"hook_event_name":"PostToolUse","tool_name":"Bash","cwd":"'"$PWD"'",
+  "tool_input":{"command":"pytest -q"},
+  "tool_response":{"stdout":"","stderr":"KeyError: '"'"'DATABASE_URL'"'"'","interrupted":false}}' \
+  | th triage --hook
+#    → {"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"th triage: …"}}
+#    (a fuller payload lives at cmd/testdata/posttooluse.json)
+
+# 2. the session hook works
+th hook session
+
+# 3. the wiring works — in a scratch repo with the settings block above
+claude --debug
+#    …then run a command that fails with `KeyError: 'SOMETHING'`, and grep the
+#    debug log for BOTH: the hook firing, and the context landing in the model's
+#    turn. The first without the second is unknown 2 above.
+```
+
+If step 3 shows the hook firing but exit 2 being treated as a *blocked* tool
+call rather than added context, the fix is one line: `triageExit` should return
+`nil` on the hook path. The comment there says so.
 
 ## Per-worktree isolation
 
