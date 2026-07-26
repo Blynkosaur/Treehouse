@@ -172,7 +172,8 @@ func TestDropRefusesTheBusy(t *testing.T) {
 	}
 
 	// pg_sleep inside the target database holds a connection open while we drop.
-	held := exec.Command(Psql[0], append(append([]string{}, Psql[1:]...),
+	psql := Command()
+	held := exec.Command(psql[0], append(psql[1:],
 		"-d", name, "-At", "--no-psqlrc", "-c", "SELECT pg_sleep(10)")...)
 	if err := held.Start(); err != nil {
 		t.Skipf("could not hold a session open: %v", err)

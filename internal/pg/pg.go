@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
 )
@@ -36,10 +37,19 @@ var ErrBusy = errors.New("database is in use")
 // exactly the thing that makes cloning or dropping it fail.
 const maintenanceDB = "postgres"
 
-// Psql is how treehouse reaches the cluster — argv, never a shell string. The
-// default is the local client, which is what the overwhelming majority of dev
-// setups have. Use points it somewhere else.
-var Psql = []string{"psql"}
+// psqlCmd is how treehouse reaches the cluster — argv, never a shell string.
+// The default is the local client, which is what the overwhelming majority of
+// dev setups have. Use points it somewhere else.
+//
+// Guarded, and not defensively: the TUI answers a keypress by starting a
+// goroutine, so `enter` (drill in, which calls diagnose) followed by `r`
+// (refresh, which calls fleet) puts two Use calls in flight at once. The lock
+// lives here rather than in the caller because every caller would otherwise
+// need one, and the next one to be written would forget.
+var (
+	psqlMu  sync.RWMutex
+	psqlCmd = []string{"psql"}
+)
 
 // Use routes every query through a different psql, for the repo whose Postgres
 // only exists inside compose ("docker compose exec -T db psql"). An empty
@@ -49,9 +59,22 @@ var Psql = []string{"psql"}
 // expressed. Every real prefix is bare words; reach for a shell-word splitter
 // when someone's isn't.
 func Use(command string) {
-	if fields := strings.Fields(command); len(fields) > 0 {
-		Psql = fields
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return
 	}
+	psqlMu.Lock()
+	defer psqlMu.Unlock()
+	psqlCmd = fields
+}
+
+// Command is the psql argv in force, copied — callers build argv on top of it,
+// and handing out the slice itself would put an append one cap away from
+// writing into the shared one.
+func Command() []string {
+	psqlMu.RLock()
+	defer psqlMu.RUnlock()
+	return append([]string(nil), psqlCmd...)
 }
 
 // Databases lists every database in the cluster — check.DBInput's Existing,
@@ -251,13 +274,14 @@ func lines(out string) []string {
 // of building the SQL ourselves. It is also the path that lets CREATE DATABASE
 // run at all: psql does not wrap stdin in a transaction block.
 func psql(db, sql string, args ...string) (string, error) {
-	full := append(append([]string{}, Psql[1:]...),
+	psql := Command()
+	full := append(psql[1:],
 		"-d", db,
 		"-At",         // bare tuples: no headers, no alignment to parse around
 		"--no-psqlrc", // a user's .psqlrc must not shape what we read back
 		"-v", "ON_ERROR_STOP=1",
 	)
-	cmd := exec.Command(Psql[0], append(full, args...)...)
+	cmd := exec.Command(psql[0], append(full, args...)...)
 	cmd.Stdin = strings.NewReader(sql)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
