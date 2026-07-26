@@ -80,9 +80,16 @@ func applyRepairs(root string, repairs []check.Repair) error {
 	for _, r := range repairs {
 		rel := relDir(root, filepath.Dir(r.EnvPath))
 
-		switch {
-		case r.Skip != "":
+		// A skip is a note about ONE concern (ports), not a veto on the repair:
+		// whatever else it planned still gets written.
+		if r.Skip != "" {
 			say("• %s: skipped (%s)\n", rel, r.Skip)
+		}
+		if len(r.Add) == 0 {
+			continue
+		}
+
+		switch {
 		case hydrateDry && r.Create:
 			say("~ %s: would create .env (%s)\n", rel, nKeys(len(r.Add)))
 		case hydrateDry && r.Overwrite:
@@ -96,6 +103,12 @@ func applyRepairs(root string, repairs []check.Repair) error {
 				apply = envfile.Create
 			case r.Overwrite:
 				apply = envfile.Set // derived values replace what's there
+			}
+			// main's .env may sit in a gitignored dir that no checkout creates
+			// (secrets/, infra/). Without this the whole hydrate aborts on ENOENT
+			// and leaves the worktree half-built.
+			if err := os.MkdirAll(filepath.Dir(r.EnvPath), 0o755); err != nil {
+				return err
 			}
 			if err := apply(r.EnvPath, r.Add); err != nil {
 				return fmt.Errorf("%s: %w", rel, err)
@@ -173,6 +186,15 @@ func hydrateDeps(root string, wt, source check.Worktree, sourceRoot string) {
 // offsets (E2/E3). It gathers what PlanDerive can't see — the branch, the app
 // name, the sibling worktrees that form the port registry — and applies the plan.
 func hydrateDerive(root, sourceRoot string, source check.Worktree) error {
+	// main IS the base. Its ports are what every other worktree offsets FROM and
+	// its COMPOSE_PROJECT_NAME is the app name resolveApp reads back, so deriving
+	// here rewrites the source of truth: ports walk one offset further up on
+	// every run, and the project name grows another "_main" each time.
+	if within(root, sourceRoot) {
+		sayln("• main worktree: nothing to derive (its values are the base)")
+		return nil
+	}
+
 	// Re-discover: the fill phase just created .env files that did not exist
 	// when the caller walked this worktree, and derive can only rewrite files it
 	// can see. Skipping this makes derive a no-op on every `th new`.
