@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,12 +12,14 @@ import (
 	"github.com/Blynkosaur/treehouse/internal/config"
 	"github.com/Blynkosaur/treehouse/internal/deps"
 	"github.com/Blynkosaur/treehouse/internal/envfile"
+	"github.com/Blynkosaur/treehouse/internal/pg"
 	"github.com/spf13/cobra"
 )
 
 var (
 	hydrateDry      bool
 	hydrateSkipDeps bool
+	hydrateForceDB  bool
 	hydrateCmd      = &cobra.Command{
 		Use:   "hydrate",
 		Short: "Fill this worktree's .env files from the main checkout",
@@ -28,6 +31,7 @@ func init() {
 	rootCmd.AddCommand(hydrateCmd)
 	hydrateCmd.Flags().BoolVar(&hydrateDry, "dry", false, "show what would change without writing")
 	hydrateCmd.Flags().BoolVar(&hydrateSkipDeps, "skip-deps", false, "only fill .env; skip dependency provisioning")
+	hydrateCmd.Flags().BoolVar(&hydrateForceDB, "force-db", false, "disconnect everything using the template database so it can be cloned")
 	hydrateCmd.Flags().BoolVar(&quiet, "quiet", false, "print nothing")
 }
 
@@ -213,12 +217,17 @@ func hydrateDerive(root, sourceRoot string, source check.Worktree) error {
 		return err
 	}
 	branch := filepath.Base(root) // detached, bare, or run from a subdir
+	// The database gets no such fallback. A directory name keys the clone to a
+	// path, so renaming the directory orphans it permanently — a port can afford
+	// a shaky name, a database cannot. Empty is PlanDB's detached-HEAD skip.
+	dbSlug := ""
 	var fleet []check.Worktree
 	for _, ref := range refs {
 		switch {
 		case samePath(ref.Path, root):
 			if ref.Branch != "" {
 				branch = ref.Branch
+				dbSlug = check.Slug(ref.Branch)
 			}
 		case samePath(ref.Path, sourceRoot):
 			// main is passed as `source`; counting it twice would be harmless
@@ -230,8 +239,114 @@ func hydrateDerive(root, sourceRoot string, source check.Worktree) error {
 		}
 	}
 
-	in := check.DeriveInput{App: resolveApp(source, sourceRoot), Slug: check.Slug(branch), Fleet: fleet}
+	// The clone is made HERE, one step before the plan that points at it: DBName
+	// is only ever non-empty once the database is confirmed to exist, so a .env
+	// can never name one that isn't there. It also lands after the canonical
+	// repair and the deps phase, which is A2's other ordering requirement.
+	in := check.DeriveInput{
+		App:    resolveApp(source, sourceRoot),
+		Slug:   check.Slug(branch),
+		Fleet:  fleet,
+		DBName: hydrateDB(sourceRoot, branch, dbSlug, source),
+	}
 	return applyRepairs(root, check.Doctor{}.PlanDerive(wt, source, in))
+}
+
+// hydrateDB creates this worktree's database clone (A1) and returns the name to
+// point .env at — "" when nothing was created.
+//
+// Every reason not to create one is a report line, never an error: hydrate has
+// already filled env and provisioned deps by the time we get here, and an
+// unreachable Postgres must not take that work down with it. The clone itself is
+// near-instant — Postgres copies the template at the file level.
+func hydrateDB(mainRoot, branch, slug string, source check.Worktree) string {
+	in := check.DBInput{Template: templateDB(source), Slug: slug}
+
+	// Postgres is asked exactly once, and only when the plan would otherwise act.
+	// Planning twice is free (PlanDerive's sibling is a pure function), and it
+	// keeps a repo that declares no database at all from shelling out to psql
+	// just to be told there was nothing to do.
+	if (check.Doctor{}.PlanDB(in).Skip) == "" {
+		names, err := pg.Databases()
+		if err != nil {
+			// Collapsed to one line: psql's connection error is three of them, and
+			// this prints on every `th new` for a dev whose server simply isn't up.
+			say("• db: skipped (postgres is not reachable: %s)\n", strings.Join(strings.Fields(err.Error()), " "))
+			return ""
+		}
+		in.Existing = names
+	}
+
+	plan := check.Doctor{}.PlanDB(in)
+	switch {
+	case plan.Skip != "":
+		say("• db: skipped (%s)\n", plan.Skip)
+		return ""
+	case plan.Exists:
+		// A1: re-running hydrate reuses the clone rather than making a second one.
+		say("• db: %s already exists — reusing it\n", plan.Name)
+		return plan.Name
+	case hydrateDry:
+		// Dry writes nothing, so previewing the .env repoint costs nothing either.
+		say("~ db: would clone %s from %s\n", plan.Name, plan.Template)
+		return plan.Name
+	}
+
+	if hydrateForceDB {
+		// The one path that ever disconnects anybody, and only because a human
+		// spelled out the flag. Aimed at the template, never at a clone.
+		if err := pg.Terminate(plan.Template); err != nil {
+			say("✗ db: could not disconnect %s: %v\n", plan.Template, err)
+			return ""
+		}
+	}
+	if err := pg.Create(plan.Name, plan.Template); err != nil {
+		if errors.Is(err, pg.ErrTemplateBusy) {
+			reportBusy(plan.Template)
+		} else {
+			say("✗ db: %v\n", err)
+		}
+		return ""
+	}
+	say("✓ db: cloned %s from %s\n", plan.Name, plan.Template)
+
+	// Provenance carries the ORIGINAL branch name because Slug is one-way:
+	// without it `th gc` can see a stray clone but not say whose it is. Failing
+	// to record it costs a future gc, not this hydrate.
+	if err := pg.Comment(plan.Name, "treehouse:"+mainRoot+":"+branch); err != nil {
+		say("! db: %s has no provenance comment (%v) — `th gc` won't recognise it\n", plan.Name, err)
+	}
+	return plan.Name
+}
+
+// reportBusy explains a locked template instead of forcing it open. A dev server
+// holding a connection is the COMMON case, not an edge one, and retrying is
+// useless — the app reconnects instantly. So we name who is in the way and offer
+// the only two fixes that work.
+func reportBusy(template string) {
+	say("✗ db: %s is in use — Postgres cannot clone a database somebody is connected to\n", template)
+	sessions, err := pg.Sessions(template)
+	if err == nil && len(sessions) == 0 {
+		// The connections went away between createdb's failure and this query.
+		sayln("    (nothing is connected now — re-running may just work)")
+	}
+	for _, s := range sessions {
+		say("    %s\n", s)
+	}
+	sayln("  fix: stop the app and re-run, or `th hydrate --force-db` to disconnect it")
+}
+
+// templateDB resolves the shared database every clone is cut from: whatever
+// main's root .env points at. DATABASE_URL is the source of truth because it is
+// what an ORM actually dials; POSTGRES_DB is the compose-style fallback. Empty
+// means the repo declares no database — and then nothing is created at all,
+// which is what keeps `th new` in a non-Postgres repo from leaving orphans.
+func templateDB(source check.Worktree) string {
+	vars := source.EnvVarsByDir()["."]
+	if db, ok := check.DBFromURL(vars["DATABASE_URL"]); ok {
+		return db
+	}
+	return vars["POSTGRES_DB"]
 }
 
 // resolveApp names the compose project family. If main's root .env already

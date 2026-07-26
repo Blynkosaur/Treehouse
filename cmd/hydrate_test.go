@@ -129,6 +129,49 @@ func TestHydrateCreatesMissingDirs(t *testing.T) {
 	}
 }
 
+// TestHydrateWithoutADatabase is the orphan-prevention strategy, end to end: a
+// repo that names no database anywhere gets no clone — and, because creation is
+// conditional on having somewhere to point the result, never even asks Postgres
+// a question. Env fill and deps still run in full. (gitignoredEnvRepo declares
+// DB_URL, not DATABASE_URL, so nothing here resolves a template.)
+func TestHydrateWithoutADatabase(t *testing.T) {
+	main := gitignoredEnvRepo(t)
+	write(t, filepath.Join(main, "node_modules", "left-pad", "index.js"), "//\n")
+
+	out, _, code := runSplit(t, main, "new", "nodb")
+	if code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	wt := filepath.Join(filepath.Dir(main), "app-nodb")
+
+	if strings.Contains(out, "cloned "+"app") || strings.Contains(out, "createdb") {
+		t.Errorf("a repo with no database got one anyway:\n%s", out)
+	}
+	if !strings.Contains(out, "nothing pointing at it") {
+		t.Errorf("the db phase should say why it did nothing:\n%s", out)
+	}
+	if strings.Contains(out, "postgres is not reachable") {
+		t.Errorf("shelled out to psql for a repo that declares no database:\n%s", out)
+	}
+
+	vars := parseEnv(readEnv(t, filepath.Join(wt, ".env")))
+	for _, key := range []string{"DATABASE_URL", "POSTGRES_DB"} {
+		if _, ok := vars[key]; ok {
+			t.Errorf("%s written with no database behind it: %q", key, vars[key])
+		}
+	}
+	// The other phases are untouched by any of this.
+	if vars["DB_URL"] != "postgres://local" {
+		t.Errorf("env fill did not run: DB_URL = %q", vars["DB_URL"])
+	}
+	if vars["COMPOSE_PROJECT_NAME"] != "app_nodb" {
+		t.Errorf("derive did not run: COMPOSE_PROJECT_NAME = %q", vars["COMPOSE_PROJECT_NAME"])
+	}
+	if _, err := os.Stat(filepath.Join(wt, "node_modules", "left-pad", "index.js")); err != nil {
+		t.Errorf("deps did not run: %v\n%s", err, out)
+	}
+}
+
 func TestNewBranchResolution(t *testing.T) {
 	t.Run("no origin at all", func(t *testing.T) {
 		main := gitignoredEnvRepo(t)
