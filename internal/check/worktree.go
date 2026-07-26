@@ -101,23 +101,75 @@ func (w Worktree) EnvVarsByDir() map[string]map[string]string {
 	return byDir
 }
 
+// Ref is git's view of one worktree — the checkout as the repository knows it,
+// independent of what env files live inside it. new, ls and rm all need this;
+// one porcelain parser serves them all.
+type Ref struct {
+	Path     string
+	Branch   string // short name ("feat/x"), empty when detached or bare
+	Head     string // commit sha
+	Detached bool
+	Bare     bool
+	Locked   bool
+	Prunable bool
+}
+
+// Worktrees lists every worktree of the repository containing cwd, in git's
+// order — the main worktree first, guaranteed.
+func Worktrees(cwd string) ([]Ref, error) {
+	cmd := exec.Command("git", "worktree", "list", "--porcelain")
+	cmd.Dir = cwd
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktrees(string(output)), nil
+}
+
+// parseWorktrees reads `git worktree list --porcelain`: blank-line-separated
+// blocks, each opening with "worktree <path>", the rest either "key value" or a
+// bare flag word. Split out from Worktrees so it can be tested without a repo.
+func parseWorktrees(output string) []Ref {
+	var refs []Ref
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			refs = append(refs, Ref{Path: path})
+			continue
+		}
+		if len(refs) == 0 {
+			continue // stray line before any block: nothing to attach it to
+		}
+		r := &refs[len(refs)-1]
+		switch {
+		case strings.HasPrefix(line, "HEAD "):
+			r.Head = strings.TrimPrefix(line, "HEAD ")
+		case strings.HasPrefix(line, "branch "):
+			r.Branch = strings.TrimPrefix(strings.TrimPrefix(line, "branch "), "refs/heads/")
+		case line == "detached":
+			r.Detached = true
+		case line == "bare":
+			r.Bare = true
+		case line == "locked" || strings.HasPrefix(line, "locked "):
+			r.Locked = true
+		case line == "prunable" || strings.HasPrefix(line, "prunable "):
+			r.Prunable = true
+		}
+	}
+	return refs
+}
+
 // MainWorktree returns the path of the repository's primary worktree — the
 // first entry `git worktree list` reports (git guarantees the main checkout
 // comes first). hydrate sources canonical env values from it. cwd selects the
 // repository to ask; it need not be the main worktree itself.
 func MainWorktree(cwd string) (string, error) {
-	cmd := exec.Command("git", "worktree", "list", "--porcelain")
-	cmd.Dir = cwd
-	output, err := cmd.Output()
+	refs, err := Worktrees(cwd)
 	if err != nil {
 		return "", err
 	}
-	// Porcelain output is blank-line-separated blocks, each opening with a
-	// "worktree <path>" line. The first such line is the main worktree.
-	for _, line := range strings.Split(string(output), "\n") {
-		if path, ok := strings.CutPrefix(line, "worktree "); ok {
-			return path, nil
-		}
+	if len(refs) == 0 {
+		return "", errors.New("no worktrees found")
 	}
-	return "", errors.New("no worktrees found")
+	return refs[0].Path, nil
 }

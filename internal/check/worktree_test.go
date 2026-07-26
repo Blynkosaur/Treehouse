@@ -137,6 +137,43 @@ func TestMainWorktree(t *testing.T) {
 	}
 }
 
+func TestParseWorktrees(t *testing.T) {
+	// Real `git worktree list --porcelain` shapes: normal, detached, bare,
+	// locked-with-reason, prunable-with-reason.
+	const output = `worktree /repo
+HEAD 1111111111111111111111111111111111111111
+branch refs/heads/main
+
+worktree /repo-feat
+HEAD 2222222222222222222222222222222222222222
+branch refs/heads/feat/login
+
+worktree /repo-detached
+HEAD 3333333333333333333333333333333333333333
+detached
+
+worktree /repo-bare
+bare
+
+worktree /repo-locked
+HEAD 4444444444444444444444444444444444444444
+branch refs/heads/wip
+locked on removable media
+prunable gitdir file points to non-existent location
+
+`
+	want := []Ref{
+		{Path: "/repo", Branch: "main", Head: "1111111111111111111111111111111111111111"},
+		{Path: "/repo-feat", Branch: "feat/login", Head: "2222222222222222222222222222222222222222"},
+		{Path: "/repo-detached", Head: "3333333333333333333333333333333333333333", Detached: true},
+		{Path: "/repo-bare", Bare: true},
+		{Path: "/repo-locked", Branch: "wip", Head: "4444444444444444444444444444444444444444", Locked: true, Prunable: true},
+	}
+	if got := parseWorktrees(output); !reflect.DeepEqual(got, want) {
+		t.Errorf("parseWorktrees()\n  got:  %+v\n  want: %+v", got, want)
+	}
+}
+
 func TestEnvVarsByDir(t *testing.T) {
 	wt := Worktree{
 		Root: "/wt",
