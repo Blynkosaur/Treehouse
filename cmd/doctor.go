@@ -46,7 +46,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 
 	switch {
 	case jsonOut:
-		if err := printJSON(findings, root); err != nil {
+		if err := printFindingsJSON(findings, root); err != nil {
 			return err
 		}
 	case quiet:
@@ -80,41 +80,31 @@ func diagnose(root string) ([]check.Finding, error) {
 	return d.CheckEnv(wt, source), nil
 }
 
-// status folds findings into the single word --json reports and the exit code
-// encodes: inferred drift is a warning, a curated required key is a failure.
-func status(findings []check.Finding) string {
-	s := "ok"
-	for _, f := range findings {
-		if f.Fails() {
-			return "fail"
-		}
-		if f.Drifted() {
-			s = "warn"
-		}
-	}
-	return s
-}
-
 // verdict turns findings into this process's exit code.
 func verdict(findings []check.Finding) error {
-	if status(findings) == "fail" {
+	if check.EnvStatus(findings) == "fail" {
 		return exitCode(2)
 	}
 	return nil
 }
 
-// printJSON emits an object, never a bare array: hooks that key off "status"
-// keep working when findings grow fields or the envelope grows keys.
-func printJSON(findings []check.Finding, root string) error {
+// printFindingsJSON emits an object, never a bare array: hooks that key off
+// "status" keep working when findings grow fields or the envelope grows keys.
+// `th ls` emits the same envelope with a "worktrees" list in place of findings.
+func printFindingsJSON(findings []check.Finding, root string) error {
 	if findings == nil {
 		findings = []check.Finding{} // [] not null — consumers shouldn't special-case
 	}
-	out, err := json.MarshalIndent(struct {
+	return printJSON(struct {
 		Schema   int             `json:"schema"`
 		Root     string          `json:"root"`
 		Status   string          `json:"status"`
 		Findings []check.Finding `json:"findings"`
-	}{1, root, status(findings), findings}, "", "  ")
+	}{1, root, check.EnvStatus(findings), findings})
+}
+
+func printJSON(envelope any) error {
+	out, err := json.MarshalIndent(envelope, "", "  ")
 	if err != nil {
 		return err
 	}

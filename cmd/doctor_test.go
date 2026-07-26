@@ -131,3 +131,53 @@ func TestHydrateQuiet(t *testing.T) {
 		t.Errorf("quiet hydrate did no work: %v", err)
 	}
 }
+
+func TestLs(t *testing.T) {
+	main := mainRepo(t)
+	if out, ok := runTh(t, main, "new", "feat", "--skip-deps"); !ok {
+		t.Fatalf("%s", out)
+	}
+	linked := filepath.Join(filepath.Dir(main), "app-feat")
+
+	out, code := runCode(t, linked, "ls")
+	if code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	for _, want := range []string{"app", "app-feat", "feat", "WORKTREE", "BRANCH", "ENV"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q:\n%s", want, out)
+		}
+	}
+
+	raw, code := runCode(t, linked, "ls", "--json")
+	if code != 0 {
+		t.Fatalf("exit %d:\n%s", code, raw)
+	}
+	var envelope struct {
+		Schema    int    `json:"schema"`
+		Status    string `json:"status"`
+		Worktrees []struct {
+			Branch  string `json:"branch"`
+			Env     string `json:"env"`
+			Current bool   `json:"current"`
+		} `json:"worktrees"`
+	}
+	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
+		t.Fatalf("ls --json is not clean JSON (%v):\n%s", err, raw)
+	}
+	if envelope.Schema != 1 || len(envelope.Worktrees) != 2 {
+		t.Fatalf("envelope = %+v, want schema 1 and 2 worktrees", envelope)
+	}
+	current := 0
+	for _, w := range envelope.Worktrees {
+		if w.Current {
+			current++
+			if w.Branch != "feat" {
+				t.Errorf("current row is %q, want the worktree we ran in", w.Branch)
+			}
+		}
+	}
+	if current != 1 {
+		t.Errorf("%d rows marked current, want exactly 1", current)
+	}
+}

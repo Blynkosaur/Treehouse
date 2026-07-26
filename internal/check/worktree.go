@@ -132,6 +132,11 @@ type Ref struct {
 	Bare     bool
 	Locked   bool
 	Prunable bool
+
+	// Filled by cmd, not by Worktrees: porcelain doesn't carry these, and
+	// asking git for them once per worktree is cmd's job, not the planner's.
+	Behind int  // commits in the main branch this one doesn't have
+	Dirty  bool // uncommitted changes in the working tree
 }
 
 // Worktrees lists every worktree of the repository containing cwd, in git's
