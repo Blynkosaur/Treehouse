@@ -16,6 +16,13 @@ import (
 // the agent extension point for languages beyond the built-in node/python.
 type File struct {
 	Deps []check.DepRule `toml:"deps"`
+	Env  Env             `toml:"env"`
+}
+
+// Env carries the human's judgment about env keys. Required is the whole FAIL
+// tier: inferred requirements are warnings, a curated list is a failure.
+type Env struct {
+	Required []string `toml:"required"`
 }
 
 // Load reads <root>/treehouse.toml. A missing file is normal (empty File, nil

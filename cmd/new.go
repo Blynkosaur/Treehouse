@@ -29,6 +29,7 @@ func init() {
 	// Deliberately the same variable hydrate binds: one flag, one meaning, and
 	// only one command ever runs per process.
 	newCmd.Flags().BoolVar(&hydrateSkipDeps, "skip-deps", false, "skip dependency provisioning")
+	newCmd.Flags().BoolVar(&quiet, "quiet", false, "print nothing; the exit code is the answer")
 }
 
 // runNew is an adapter: resolve where the worktree goes, let git make it, then
@@ -66,7 +67,7 @@ func runNew(cmd *cobra.Command, args []string) error {
 	// Offline and local-only repos must still work, so a failed fetch is a
 	// warning; only an unresolvable base ref is fatal.
 	if _, err := gitOut(cwd, "fetch", "origin"); err != nil {
-		fmt.Println("! could not fetch origin — cutting from local refs")
+		sayln("! could not fetch origin — cutting from local refs")
 	}
 
 	add, err := addArgs(cwd, branch, path)
@@ -76,24 +77,25 @@ func runNew(cmd *cobra.Command, args []string) error {
 	if out, err := gitOut(cwd, add...); err != nil {
 		return fmt.Errorf("git worktree add: %w\n%s", err, out)
 	}
-	fmt.Printf("✓ worktree for %s at %s\n", branch, path)
+	say("✓ worktree for %s at %s\n", branch, path)
 
 	if refs[0].Bare {
 		// Nothing to copy from: a bare repo has no checkout, so no canonical
 		// .env exists. Say so instead of reporting a silent no-op hydrate.
-		fmt.Println("• main worktree is bare — no canonical env to source from")
+		sayln("• main worktree is bare — no canonical env to source from")
 	} else if err := hydrateAll(path); err != nil {
 		return err
 	}
 
-	fmt.Println()
-	wt, err := check.Discover(path)
+	sayln()
+	findings, err := diagnose(path)
 	if err != nil {
 		return err
 	}
-	source, _ := check.Discover(mainRoot)
-	printReport(check.Doctor{}.CheckEnv(wt, source), path)
-	return nil
+	if !quiet {
+		printReport(findings, path)
+	}
+	return verdict(findings)
 }
 
 // newWorktreePath puts the worktree BESIDE the main checkout, never inside it.

@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
+	"github.com/Blynkosaur/treehouse/internal/config"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/spf13/cobra"
@@ -14,6 +16,8 @@ import (
 
 var (
 	lsMode    bool
+	jsonOut   bool
+	quiet     bool
 	doctorCmd = &cobra.Command{
 		Use:   "doctor",
 		Short: "Report env drift for every service in this worktree",
@@ -24,6 +28,8 @@ var (
 func init() {
 	rootCmd.AddCommand(doctorCmd)
 	doctorCmd.Flags().BoolVar(&lsMode, "ls", false, "compact table output")
+	doctorCmd.Flags().BoolVar(&jsonOut, "json", false, "machine-readable output; suppresses all human text")
+	doctorCmd.Flags().BoolVar(&quiet, "quiet", false, "print nothing; the exit code is the answer")
 }
 
 // runDoctor is pure adapter: gather input, call internal/check, pick a face.
@@ -33,27 +39,86 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	wt, err := check.Discover(root)
+	findings, err := diagnose(root)
 	if err != nil {
 		return err
 	}
 
-	// Reference for expected keys: a service's own .env.example, else the main
-	// checkout's .env. Outside a git repo there's no fallback — doctor still
-	// works from .env.example alone.
-	var source check.Worktree
-	if mainRoot, err := check.MainWorktree(root); err == nil {
-		source, _ = check.Discover(mainRoot)
-	}
-	findings := check.Doctor{}.CheckEnv(wt, source)
-
-	if lsMode {
+	switch {
+	case jsonOut:
+		if err := printJSON(findings, root); err != nil {
+			return err
+		}
+	case quiet:
+	case lsMode:
 		printTable(findings, root)
-	} else {
+	default:
 		printReport(findings, root)
 	}
-	// Exit 0 by design: inferred requirements are WARN-level; FAIL is
-	// reserved for human-curated config, which doesn't exist yet.
+	return verdict(findings)
+}
+
+// diagnose is doctor's gathering half: this worktree, the main checkout as
+// fallback reference, and main's curated config. `new` and `ls` call it too, so
+// the verdict is computed in exactly one place.
+func diagnose(root string) ([]check.Finding, error) {
+	wt, err := check.Discover(root)
+	if err != nil {
+		return nil, err
+	}
+
+	// Reference for expected keys: a service's own .env.example, else the main
+	// checkout's .env. Outside a git repo there's no fallback — doctor still
+	// works from .env.example alone, and with no curated required list.
+	var source check.Worktree
+	var d check.Doctor
+	if mainRoot, err := check.MainWorktree(root); err == nil {
+		source, _ = check.Discover(mainRoot)
+		cfg, _ := config.Load(mainRoot) // absent/broken config: inferred-only
+		d.Required = cfg.Env.Required
+	}
+	return d.CheckEnv(wt, source), nil
+}
+
+// status folds findings into the single word --json reports and the exit code
+// encodes: inferred drift is a warning, a curated required key is a failure.
+func status(findings []check.Finding) string {
+	s := "ok"
+	for _, f := range findings {
+		if f.Fails() {
+			return "fail"
+		}
+		if f.Drifted() {
+			s = "warn"
+		}
+	}
+	return s
+}
+
+// verdict turns findings into this process's exit code.
+func verdict(findings []check.Finding) error {
+	if status(findings) == "fail" {
+		return exitCode(2)
+	}
+	return nil
+}
+
+// printJSON emits an object, never a bare array: hooks that key off "status"
+// keep working when findings grow fields or the envelope grows keys.
+func printJSON(findings []check.Finding, root string) error {
+	if findings == nil {
+		findings = []check.Finding{} // [] not null — consumers shouldn't special-case
+	}
+	out, err := json.MarshalIndent(struct {
+		Schema   int             `json:"schema"`
+		Root     string          `json:"root"`
+		Status   string          `json:"status"`
+		Findings []check.Finding `json:"findings"`
+	}{1, root, status(findings), findings}, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
 	return nil
 }
 
@@ -68,7 +133,7 @@ func relDir(root, dir string) string {
 
 // printReport is the narrative face: multi-line, explanatory, human-paced.
 func printReport(findings []check.Finding, root string) {
-	problems := 0
+	problems, failed := 0, 0
 	for _, f := range findings {
 		rel := relDir(root, f.Dir)
 		switch {
@@ -92,11 +157,18 @@ func printReport(findings []check.Finding, root string) {
 		default:
 			fmt.Printf("✓ %s: .env has all %d expected keys\n", rel, f.Keys)
 		}
+		if f.Fails() {
+			failed++
+			fmt.Printf("    required by treehouse.toml: %s\n", strings.Join(f.Failed, ", "))
+		}
 	}
 
-	if problems == 0 {
+	switch {
+	case problems == 0:
 		fmt.Println("\nall clear")
-	} else {
+	case failed > 0:
+		fmt.Printf("\n%d service(s) with env drift, %d missing a required key\n", problems, failed)
+	default:
 		fmt.Printf("\n%d service(s) with env drift (inferred requirements → warnings only)\n", problems)
 	}
 }

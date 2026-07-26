@@ -45,6 +45,11 @@ const treehouseTOML = `# treehouse.toml — shared, committed project config (li
 # name = ".venv"
 # action = "recreate"
 # command = "poetry install"
+
+# Keys treehouse must not merely warn about. Anything inferred from .env.example
+# is a warning (exit 0); a key listed here missing or empty makes doctor exit 2.
+# [env]
+# required = ["DATABASE_URL"]
 `
 
 // runInit writes treehouseTOML to the current directory, refusing to overwrite

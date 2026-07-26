@@ -28,6 +28,7 @@ func init() {
 	rootCmd.AddCommand(hydrateCmd)
 	hydrateCmd.Flags().BoolVar(&hydrateDry, "dry", false, "show what would change without writing")
 	hydrateCmd.Flags().BoolVar(&hydrateSkipDeps, "skip-deps", false, "only fill .env; skip dependency provisioning")
+	hydrateCmd.Flags().BoolVar(&quiet, "quiet", false, "print nothing")
 }
 
 // runHydrate is a pure adapter (same shape as runDoctor): gather cwd, hand the
@@ -63,7 +64,7 @@ func hydrateAll(root string) error {
 	repairs := check.Doctor{}.PlanHydrate(wt, source)
 	// A clean env phase is a note, not an exit: the phases below still run.
 	if len(repairs) == 0 {
-		fmt.Println("nothing to hydrate — every .env already has its keys")
+		sayln("nothing to hydrate — every .env already has its keys")
 	}
 	if err := applyRepairs(root, repairs); err != nil {
 		return err
@@ -81,13 +82,13 @@ func applyRepairs(root string, repairs []check.Repair) error {
 
 		switch {
 		case r.Skip != "":
-			fmt.Printf("• %s: skipped (%s)\n", rel, r.Skip)
+			say("• %s: skipped (%s)\n", rel, r.Skip)
 		case hydrateDry && r.Create:
-			fmt.Printf("~ %s: would create .env (%s)\n", rel, nKeys(len(r.Add)))
+			say("~ %s: would create .env (%s)\n", rel, nKeys(len(r.Add)))
 		case hydrateDry && r.Overwrite:
-			fmt.Printf("~ %s: would set %s\n", rel, keyList(r.Add))
+			say("~ %s: would set %s\n", rel, keyList(r.Add))
 		case hydrateDry:
-			fmt.Printf("~ %s: would add %s\n", rel, nKeys(len(r.Add)))
+			say("~ %s: would add %s\n", rel, nKeys(len(r.Add)))
 		default:
 			apply := envfile.Append
 			switch {
@@ -101,18 +102,18 @@ func applyRepairs(root string, repairs []check.Repair) error {
 			}
 			switch {
 			case r.Create:
-				fmt.Printf("✓ %s: created .env (%s)\n", rel, nKeys(len(r.Add)))
+				say("✓ %s: created .env (%s)\n", rel, nKeys(len(r.Add)))
 			case r.Overwrite:
-				fmt.Printf("✓ %s: set %s\n", rel, keyList(r.Add))
+				say("✓ %s: set %s\n", rel, keyList(r.Add))
 			default:
-				fmt.Printf("✓ %s: added %s\n", rel, nKeys(len(r.Add)))
+				say("✓ %s: added %s\n", rel, nKeys(len(r.Add)))
 			}
 		}
 
 		// Keys the main checkout couldn't supply were written empty — the human
 		// still has to fill them, so name them explicitly.
 		if len(r.Unsourced) > 0 {
-			fmt.Printf("    fill manually (no value in main): %s\n", strings.Join(r.Unsourced, ", "))
+			say("    fill manually (no value in main): %s\n", strings.Join(r.Unsourced, ", "))
 		}
 	}
 	return nil
@@ -137,7 +138,7 @@ func hydrateDeps(root string, wt, source check.Worktree, sourceRoot string) {
 
 	plans := check.Doctor{}.PlanDeps(wt, source, rules)
 	if len(plans) == 0 {
-		fmt.Println("deps: nothing to provision")
+		sayln("deps: nothing to provision")
 		return
 	}
 
@@ -146,24 +147,24 @@ func hydrateDeps(root string, wt, source check.Worktree, sourceRoot string) {
 
 		switch {
 		case p.Skip != "":
-			fmt.Printf("• %s: skipped (%s)\n", rel, p.Skip)
+			say("• %s: skipped (%s)\n", rel, p.Skip)
 		case hydrateDry && p.Action == check.Clone:
-			fmt.Printf("~ %s: would clone\n", rel)
+			say("~ %s: would clone\n", rel)
 		case hydrateDry:
-			fmt.Printf("~ %s: would recreate (%s)\n", rel, p.Command)
+			say("~ %s: would recreate (%s)\n", rel, p.Command)
 		case p.Action == check.Clone:
 			if err := deps.CloneTree(p.Src, p.Dst); err != nil {
-				fmt.Printf("✗ %s: clone failed: %v\n", rel, err)
+				say("✗ %s: clone failed: %v\n", rel, err)
 				continue
 			}
-			fmt.Printf("✓ %s: cloned\n", rel)
+			say("✓ %s: cloned\n", rel)
 		default:
-			fmt.Printf("~ %s: recreating (%s)\n", rel, p.Command)
+			say("~ %s: recreating (%s)\n", rel, p.Command)
 			if err := deps.RunRecreate(filepath.Dir(p.Dst), p.Command); err != nil {
-				fmt.Printf("✗ %s: recreate failed: %v\n", rel, err)
+				say("✗ %s: recreate failed: %v\n", rel, err)
 				continue
 			}
-			fmt.Printf("✓ %s: recreated\n", rel)
+			say("✓ %s: recreated\n", rel)
 		}
 	}
 }

@@ -83,3 +83,33 @@ func TestCheckEnvMainFallback(t *testing.T) {
 		t.Errorf("svc_b: NoEnv=%v Missing=%v, want NoEnv=true Missing=[TOKEN]", b.NoEnv, b.Missing)
 	}
 }
+
+func TestCheckEnvRequiredFails(t *testing.T) {
+	// Inferred drift is a warning; a key the human listed as required is the
+	// only thing that turns the same drift into a failure.
+	wt := Worktree{
+		Root: "/wt",
+		EnvFiles: []envfile.File{
+			{Path: "/wt/svc/.env", Vars: map[string]string{"A": "1", "EMPTY": ""}},
+			{Path: "/wt/svc/.env.example", Vars: map[string]string{"A": "", "EMPTY": "", "GONE": ""}},
+		},
+	}
+
+	inferred := Doctor{}.CheckEnv(wt, Worktree{})
+	if len(inferred) != 1 || inferred[0].Fails() {
+		t.Fatalf("no config: drift must stay a warning, got %+v", inferred)
+	}
+
+	curated := Doctor{Required: []string{"GONE", "EMPTY", "UNRELATED"}}.CheckEnv(wt, Worktree{})
+	if len(curated) != 1 {
+		t.Fatalf("got %d findings, want 1", len(curated))
+	}
+	if !curated[0].Fails() {
+		t.Fatal("a missing required key must fail")
+	}
+	// Both a missing and an empty required key count; a required key that isn't
+	// drifted does not.
+	if !reflect.DeepEqual(curated[0].Failed, []string{"EMPTY", "GONE"}) {
+		t.Errorf("Failed = %v, want [EMPTY GONE]", curated[0].Failed)
+	}
+}

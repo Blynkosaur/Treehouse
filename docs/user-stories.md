@@ -34,6 +34,22 @@ Documented worktree pains (research + Bryan's own usage history) and the story t
 
 ---
 
+## Build status — 2026-07-20
+
+Commands shipped: `doctor`, `hydrate`, `make`, `init`. (`th` is an alias for the `treehouse` binary.)
+
+| Status | Stories |
+| --- | --- |
+| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`) |
+| 🟡 **Partial** | **C2** (doctor: env drift + `--ls` only — no services/db/seed/stale, no `--json`/`--quiet`/exit codes), **C5** (`init` scaffold — no `.env.example`/compose scan) |
+| ⬜ **Not started** | **L1–L4** (new/ls/rm/cd), **A1–A6** (db-per-worktree), **B1–B3** (triage/why), **C3** (snapshot), **C4** (SessionStart hook), **E2** (compose namespace), **E3** (port offsets), **T1** (TUI) |
+
+Foundations in place that unblock the above: `Discover`, `MainWorktree`, `EnvVarsByDir` (worktree/env model), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`), and `treehouse.toml` config parsing.
+
+**Pain coverage so far:** pain 1 (missing `.env`) via C1/hydrate; pains 2 & 9 (deps reinstall + disk) via E1. Pains 3–8, 10–13 still open.
+
+---
+
 ## Epic L — Lifecycle: the manager commands 🎯
 
 **L1. `treehouse new <branch>` — born ready.** As a Dev, one command gives me a worktree that is immediately workable: fetches origin, cuts the worktree from _fresh_ base (kills pain 6 at the root), then runs the full hydrate pipeline — env fill from canonical, db clone + `DATABASE_URL` pointing, CoW deps, compose/port namespacing, seed steps — and finishes with a doctor report.
@@ -93,21 +109,24 @@ Documented worktree pains (research + Bryan's own usage history) and the story t
 
 ---
 
-## Epic C — Core doctor/hydrator ✅ (shipped v0.1)
+## Epic C — Core doctor/hydrator 🟡 (partial — status corrected 2026-07-20 to match code)
 
-**C1.** `hydrate` fills `.env` from canonical without overwriting local values (backup first). ✅
-**C2.** `doctor` reports missing/empty required keys, dead services, unseeded data, stale base — each with a fix line; `--json`, `--quiet`, exit codes. ✅
-**C3.** `snapshot` captures the current working `.env` as canonical. ✅
-**C4.** `SessionStart` hook: agent starts with env state in context. ✅ (docs polish pending)
-**C5.** `init` scans `.env.example` + docker-compose and generates `treehouse.toml`. ✅
+**C1.** `hydrate` fills `.env` from canonical without overwriting local values. ✅ **Done** — append-only writes from the main worktree; no backup needed since it never overwrites (present-but-empty keys deferred to v2).
+**C2.** `doctor` reports missing/empty required keys, dead services, unseeded data, stale base — each with a fix line; `--json`, `--quiet`, exit codes. 🟡 **Partial** — env-key drift + `--ls` table shipped (and it now falls back to the main worktree's `.env` when no `.env.example`). Still missing: dead-service/unseeded/stale-base checks, fix lines, `--json`, `--quiet`, non-zero exit codes.
+**C3.** `snapshot` captures the current working `.env` as canonical. ⬜ **Not started** — no `snapshot` command exists.
+**C4.** `SessionStart` hook: agent starts with env state in context. ⬜ **Not started** — no treehouse hook exists.
+**C5.** `init` scans `.env.example` + docker-compose and generates `treehouse.toml`. 🟡 **Partial** — `init` writes a commented `treehouse.toml` scaffold; it does **not** yet scan `.env.example`/docker-compose to pre-populate rules.
+
+**Also shipped, not in the original stories:** `make` — generates `.env.example` from each service's `.env` (values blanked), with a main-worktree fallback for empty worktrees.
 
 ---
 
 ## Epic E — Runtime isolation & fast setup 🎯
 
-**E1. Instant dependencies.** `hydrate` clones declared heavy dirs (`node_modules`, …) from the main checkout via copy-on-write (`cp -c` on APFS) — instant, near-zero disk. Python `.venv` is _recreated_, never copied (absolute paths): built-in `uv venv && uv sync` step type.
+**E1. Instant dependencies.** ✅ **Done (2026-07-20).** `hydrate` clones declared heavy dirs (`node_modules`, …) from the main checkout via copy-on-write (`cp -c` on APFS) — instant, near-zero disk, isolated. Python `.venv` is _recreated_, never copied (absolute paths): `uv venv && uv sync`, command resolved from the manifest, reports if uv/manifest is missing. Rules are built-in defaults (node/python) extended by `treehouse.toml [[deps]]` — the agent extension point. `--skip-deps` opts out.
 
 - Evidence: 5 × 2GB node_modules = 10GB; ~10GB burned in 20 min of agent worktrees (reported).
+- Shipped as: `internal/check/deps.go` (planner), `internal/deps` (CoW doers), `internal/config` (toml), wired into `cmd/hydrate.go`. Unit + E2E tested.
 
 **E2. Compose namespace per worktree.** `hydrate` writes `COMPOSE_PROJECT_NAME=<app>_<slug>` into each worktree's `.env` — containers/networks/volumes never clobber across worktrees.
 

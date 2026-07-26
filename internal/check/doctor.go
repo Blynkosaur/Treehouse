@@ -7,24 +7,31 @@ import (
 	"github.com/Blynkosaur/treehouse/internal/envfile"
 )
 
-// Doctor examines worktrees and reports findings. Empty for now; it will grow
-// fields when curated config arrives (required keys, services, data checks).
-type Doctor struct{}
+// Doctor examines worktrees and reports findings. Required is the curated list
+// from treehouse.toml; more fields arrive with services and data checks.
+type Doctor struct {
+	Required []string // keys whose absence is a FAIL, not a WARN
+}
 
 // Finding is one directory's env-drift verdict — pure data, no presentation.
-// The same Findings feed the text printer today, --json tomorrow, the TUI later.
+// The same Findings feed the text printer, --json, and the TUI later.
 type Finding struct {
-	Dir     string   // absolute directory the .env/.env.example pair lives in
-	Missing []string // keys in .env.example but absent from .env (sorted)
-	Empty   []string // keys present in .env but with empty values (sorted)
-	NoEnv   bool     // a reference exists (example or main) but .env is missing entirely
-	Keys    int      // how many keys .env.example expects (context for output)
+	Dir     string   `json:"dir"`               // absolute directory the .env/.env.example pair lives in
+	Missing []string `json:"missing,omitempty"` // keys in the reference but absent from .env (sorted)
+	Empty   []string `json:"empty,omitempty"`   // keys present in .env but with empty values (sorted)
+	NoEnv   bool     `json:"no_env,omitempty"`  // a reference exists (example or main) but .env is missing entirely
+	Keys    int      `json:"keys"`              // how many keys the reference expects (context for output)
+	Failed  []string `json:"failed,omitempty"`  // drifted keys treehouse.toml marks required (sorted)
 }
 
 // Drifted reports whether this finding represents a problem worth flagging.
 func (f Finding) Drifted() bool {
 	return f.NoEnv || len(f.Missing) > 0 || len(f.Empty) > 0
 }
+
+// Fails separates curated failures from inferred warnings. Only a human-listed
+// key earns a non-zero exit; everything we merely inferred stays a warning.
+func (f Finding) Fails() bool { return len(f.Failed) > 0 }
 
 // CheckEnv reports env drift for each service. The reference for "which keys
 // should exist" is a service's sibling .env.example when it has one; for repos
@@ -103,6 +110,7 @@ func (d Doctor) CheckEnv(w, source Worktree) []Finding {
 				f.Missing = append(f.Missing, key)
 			}
 			sort.Strings(f.Missing)
+			d.markFailed(&f)
 			findings = append(findings, f)
 			continue
 		}
@@ -117,7 +125,29 @@ func (d Doctor) CheckEnv(w, source Worktree) []Finding {
 		}
 		sort.Strings(f.Missing)
 		sort.Strings(f.Empty)
+		d.markFailed(&f)
 		findings = append(findings, f)
 	}
 	return findings
+}
+
+// markFailed records which of a finding's drifted keys the human curated as
+// required. That intersection is the entire difference between exit 0 and exit 2.
+func (d Doctor) markFailed(f *Finding) {
+	if len(d.Required) == 0 {
+		return
+	}
+	drifted := map[string]bool{}
+	for _, key := range f.Missing {
+		drifted[key] = true
+	}
+	for _, key := range f.Empty {
+		drifted[key] = true
+	}
+	for _, key := range d.Required {
+		if drifted[key] {
+			f.Failed = append(f.Failed, key)
+		}
+	}
+	sort.Strings(f.Failed)
 }

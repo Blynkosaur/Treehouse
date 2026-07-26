@@ -105,3 +105,19 @@ func TestMergeRules(t *testing.T) {
 		t.Errorf("defaults mutated: %+v, want %+v", defaults, defaultsBefore)
 	}
 }
+
+func TestLoadParsesRequired(t *testing.T) {
+	dir := t.TempDir()
+	writeToml(t, dir, `
+[env]
+required = ["DATABASE_URL", "STRIPE_KEY"]
+`)
+	f, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"DATABASE_URL", "STRIPE_KEY"}
+	if !reflect.DeepEqual(f.Env.Required, want) {
+		t.Errorf("Env.Required = %v, want %v", f.Env.Required, want)
+	}
+}
