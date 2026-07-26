@@ -64,6 +64,11 @@ func hydrateAll(root string) error {
 	if err != nil {
 		return err
 	}
+	// Read once, before any phase acts: a repo whose Postgres lives inside
+	// compose needs this in place before the clone is attempted, not after.
+	if cfg, err := config.Load(sourceRoot); err == nil {
+		pg.Use(cfg.Database.Psql)
+	}
 
 	repairs := check.Doctor{}.PlanHydrate(wt, source)
 	// A clean env phase is a note, not an exit: the phases below still run.
@@ -156,7 +161,7 @@ func hydrateDeps(root string, wt, source check.Worktree, sourceRoot string) {
 	}
 
 	cfg, _ := config.Load(sourceRoot) // absent/broken config: fall back to defaults
-	rules := config.MergeRules(check.DefaultDepRules(), cfg.Deps)
+	rules := config.Merge(check.DefaultDepRules(), cfg.Deps, func(r check.DepRule) string { return r.Name })
 
 	plans := check.Doctor{}.PlanDeps(wt, source, rules)
 	if len(plans) == 0 {

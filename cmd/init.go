@@ -50,6 +50,27 @@ const treehouseTOML = `# treehouse.toml — shared, committed project config (li
 # is a warning (exit 0); a key listed here missing or empty makes doctor exit 2.
 # [env]
 # required = ["DATABASE_URL"]
+
+# The database clone and the .env repoint need NO config: the template, the
+# connection and the clone name all come from main's own .env. Set this only if
+# your Postgres isn't reachable by a plain local psql.
+# [database]
+# psql = "docker compose exec -T db psql"
+
+# Migration state (th doctor --db). treehouse reads the EXIT CODE — alembic,
+# Django and prisma all exit non-zero when migrations are pending, and that is
+# the only signal all three agree on. dir is inferred from migrations/,
+# alembic/versions/, prisma/migrations/, db/migrate/; set it if that guesses wrong.
+# [migrations]
+# status = "alembic current"
+# dir = "db/migrate"
+
+# Named datasets for "th seed <name>", run against this worktree's own clone.
+# treehouse records what it loaded in the database itself, so there is no state
+# file to keep in sync and none to garbage-collect.
+# [[seed]]
+# name = "ramp"
+# command = "python manage.py loaddata ramp"
 `
 
 // runInit writes treehouseTOML to the current directory, refusing to overwrite

@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -18,6 +21,7 @@ var (
 	lsMode    bool
 	jsonOut   bool
 	quiet     bool
+	doctorDB  bool
 	doctorCmd = &cobra.Command{
 		Use:   "doctor",
 		Short: "Report env drift for every service in this worktree",
@@ -30,6 +34,7 @@ func init() {
 	doctorCmd.Flags().BoolVar(&lsMode, "ls", false, "compact table output")
 	doctorCmd.Flags().BoolVar(&jsonOut, "json", false, "machine-readable output; suppresses all human text")
 	doctorCmd.Flags().BoolVar(&quiet, "quiet", false, "print nothing; the exit code is the answer")
+	doctorCmd.Flags().BoolVar(&doctorDB, "db", false, "also run the project's migration-status and seed checks")
 }
 
 // runDoctor is pure adapter: gather input, call internal/check, pick a face.
@@ -74,17 +79,19 @@ func diagnose(root string) ([]check.Finding, []check.Check, error) {
 	var source check.Worktree
 	var d check.Doctor
 	mainRoot, gitErr := check.MainWorktree(root)
+	var cfg config.File
 	if gitErr == nil {
 		source, _ = check.Discover(mainRoot)
-		cfg, _ := config.Load(mainRoot) // absent/broken config: inferred-only
+		cfg, _ = config.Load(mainRoot) // absent/broken config: inferred-only
 		d.Required = cfg.Env.Required
+		pg.Use(cfg.Database.Psql)
 	}
 
 	findings := d.CheckEnv(wt, source)
 	if gitErr != nil {
 		return findings, nil, nil // outside a repo there is no fleet and no clone
 	}
-	return findings, dbChecks(d, root, mainRoot, wt, source), nil
+	return findings, dbChecks(d, root, mainRoot, wt, source, cfg), nil
 }
 
 // dbChecks asks Postgres the one question doctor always wants answered: does
@@ -93,7 +100,7 @@ func diagnose(root string) ([]check.Finding, []check.Check, error) {
 // Postgres is asked exactly once, and only when main's .env names a database at
 // all — so `th doctor` in a repo with no Postgres never shells out, the same
 // bargain hydrate makes.
-func dbChecks(d check.Doctor, root, mainRoot string, wt, source check.Worktree) []check.Check {
+func dbChecks(d check.Doctor, root, mainRoot string, wt, source check.Worktree, cfg config.File) []check.Check {
 	template := check.EnvDB(source)
 	if template == "" {
 		return nil // no database in this repo: no row, not an empty one
@@ -104,27 +111,116 @@ func dbChecks(d check.Doctor, root, mainRoot string, wt, source check.Worktree) 
 			Detail: "postgres is not reachable: " + oneLine(err)}}
 	}
 
+	refs, _ := check.Worktrees(root)
 	state := check.DBState{
-		Plan:  d.PlanDB(check.DBInput{Template: template, Existing: names, Slug: branchSlug(root)}),
+		Plan:  d.PlanDB(check.DBInput{Template: template, Existing: names, Slug: branchSlug(refs, root)}),
 		EnvDB: check.EnvDB(wt),
 		Main:  within(root, mainRoot),
 	}
-	return []check.Check{d.CheckDB(state)}
+	checks := []check.Check{d.CheckDB(state)}
+	return append(checks, dataChecks(d, root, mainBranch(refs), wt, state.Plan, cfg)...)
 }
+
+// dataChecks runs the PROJECT's own tooling, and only because a human asked:
+// `th doctor --db`. A migration-status command is seconds of somebody else's
+// process, so it is opt-in here and flatly unreachable from `th ls`, which
+// exists to be glanced at.
+func dataChecks(d check.Doctor, root, mainBranch string, wt check.Worktree, plan check.DBPlan, cfg config.File) []check.Check {
+	if !doctorDB {
+		return nil
+	}
+	var present []string
+	if plan.Exists {
+		present, _ = pg.Seeds(plan.Name)
+	}
+	return []check.Check{
+		d.CheckMigrations(migrationState(root, mainBranch, wt, cfg)),
+		d.CheckSeed(config.Merge(nil, cfg.Seed, seedName), present),
+	}
+}
+
+// migrationState runs the configured status command and asks git what this
+// branch added. Both halves are gathered here so CheckMigrations stays pure.
+func migrationState(root, mainBranch string, wt check.Worktree, cfg config.File) check.MigrationInput {
+	in := check.MigrationInput{Command: cfg.Migrations.Status}
+	if in.Command == "" {
+		return in
+	}
+
+	out, err := runIn(root, wt, in.Command)
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+	case !errors.As(err, &exit):
+		in.Err = oneLine(err)
+	case exit.ExitCode() == 126 || exit.ExitCode() == 127:
+		// The shell could not run it at all. Reading that as "migrations pending"
+		// would report a typo in treehouse.toml as a permanent database problem.
+		in.Err = strings.TrimSpace(string(out))
+	default:
+		in.Pending = true
+	}
+
+	in.Dir = check.MigrationsDir(root, cfg.Migrations.Dir)
+	if in.Dir != "" && mainBranch != "" {
+		in.Added = addedMigrations(root, mainBranch, in.Dir)
+	}
+	return in
+}
+
+// addedMigrations counts the migration files this branch has that the main
+// branch does not. Three dots, not two: we want what THIS branch added since it
+// diverged, not everything the two have done since.
+func addedMigrations(root, mainBranch, dir string) int {
+	out, err := gitOut(root, "diff", "--name-only", mainBranch+"...HEAD", "--", dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// runIn runs one of the project's own commands in dir, with this worktree's
+// root .env in the environment — that is what makes `alembic current` answer
+// about THIS worktree's clone rather than whatever the shell happened to
+// export. ponytail: the root .env only; a monorepo whose migration tool lives
+// in a subdirectory with its own .env gets os.Environ and its own dotenv
+// loading, same as it has today.
+func runIn(dir string, wt check.Worktree, command string) ([]byte, error) {
+	c := exec.Command("sh", "-c", command)
+	c.Dir = dir
+	c.Env = os.Environ()
+	for key, val := range wt.EnvVarsByDir()["."] {
+		c.Env = append(c.Env, key+"="+val)
+	}
+	return c.CombinedOutput()
+}
+
+func seedName(s check.Seed) string { return s.Name }
 
 // branchSlug is the slug naming this worktree's clone, or "" when no branch
 // does — the same detached-HEAD skip PlanDB reports.
-func branchSlug(root string) string {
-	refs, err := check.Worktrees(root)
-	if err != nil {
-		return ""
-	}
+func branchSlug(refs []check.Ref, root string) string {
 	for _, ref := range refs {
 		if samePath(ref.Path, root) && ref.Branch != "" {
 			return check.Slug(ref.Branch)
 		}
 	}
 	return ""
+}
+
+// mainBranch is what `added migrations` is measured against. Empty when main is
+// detached or bare, and then there is nothing to diff.
+func mainBranch(refs []check.Ref) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	return refs[0].Branch
 }
 
 // verdict turns the whole report into this process's exit code.

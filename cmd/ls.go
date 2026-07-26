@@ -46,6 +46,7 @@ func runLs(cmd *cobra.Command, args []string) error {
 	mainRoot := refs[0].Path
 	source, _ := check.Discover(mainRoot)
 	cfg, _ := config.Load(mainRoot)
+	pg.Use(cfg.Database.Psql)
 	d := check.Doctor{Required: cfg.Env.Required, MainBranch: refs[0].Branch}
 
 	// ONE psql round trip for the whole fleet, and only when main's .env names a

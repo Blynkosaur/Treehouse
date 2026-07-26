@@ -189,9 +189,10 @@ func TestPlanDepsNewLanguageRuleViaMerge(t *testing.T) {
 	w := t.TempDir()
 	writeFile(t, filepath.Join(source, "vendor", "bundle", "gem.rb"), "puts 1")
 
-	rules := config.MergeRules(
+	rules := config.Merge(
 		check.DefaultDepRules(),
 		[]check.DepRule{{Name: "vendor/bundle", Action: check.Clone}},
+		func(r check.DepRule) string { return r.Name },
 	)
 	plans := check.Doctor{}.PlanDeps(check.Worktree{Root: w}, check.Worktree{Root: source}, rules)
 

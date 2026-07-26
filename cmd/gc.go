@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
+	"github.com/Blynkosaur/treehouse/internal/config"
 	"github.com/Blynkosaur/treehouse/internal/pg"
 	"github.com/spf13/cobra"
 )
@@ -92,6 +93,9 @@ func planGC(fleet []check.Ref, mainRoot string) ([]check.DBDrop, error) {
 	source, err := check.Discover(mainRoot)
 	if err != nil {
 		return nil, err
+	}
+	if cfg, err := config.Load(mainRoot); err == nil {
+		pg.Use(cfg.Database.Psql)
 	}
 	owned, err := pg.Commented()
 	if err != nil {

@@ -65,7 +65,7 @@ action = "bogus"
 	}
 }
 
-func TestMergeRules(t *testing.T) {
+func TestMerge(t *testing.T) {
 	defaults := check.DefaultDepRules()
 	defaultsBefore := make([]check.DepRule, len(defaults))
 	copy(defaultsBefore, defaults)
@@ -74,7 +74,7 @@ func TestMergeRules(t *testing.T) {
 		{Name: ".venv", Action: check.Recreate, Command: "poetry install"}, // replaces default
 		{Name: "target", Action: check.Recreate, Command: "cargo build"},   // new → appends
 	}
-	merged := config.MergeRules(defaults, override)
+	merged := config.Merge(defaults, override, ruleName)
 
 	// Override by Name replaces the default's command.
 	var venv check.DepRule
@@ -103,6 +103,53 @@ func TestMergeRules(t *testing.T) {
 	// Original defaults slice not mutated.
 	if !reflect.DeepEqual(defaults, defaultsBefore) {
 		t.Errorf("defaults mutated: %+v, want %+v", defaults, defaultsBefore)
+	}
+}
+
+func ruleName(r check.DepRule) string { return r.Name }
+
+// TestMergeIsGeneric: seeds need the same name-keyed overlay dep rules do, and
+// phase 4's triage signatures will be the third. One function, not three.
+func TestMergeSeeds(t *testing.T) {
+	merged := config.Merge(nil, []check.Seed{
+		{Name: "ramp", Command: "old"},
+		{Name: "sondermind", Command: "b"},
+		{Name: "ramp", Command: "new"}, // a duplicated entry: last wins, not both
+	}, func(s check.Seed) string { return s.Name })
+
+	want := []check.Seed{{Name: "ramp", Command: "new"}, {Name: "sondermind", Command: "b"}}
+	if !reflect.DeepEqual(merged, want) {
+		t.Errorf("Merge = %+v, want %+v", merged, want)
+	}
+}
+
+func TestLoadParsesConfigSchema(t *testing.T) {
+	dir := t.TempDir()
+	writeToml(t, dir, `
+[database]
+psql = "docker compose exec -T db psql"
+
+[migrations]
+status = "alembic current"
+dir = "db/migrate"
+
+[[seed]]
+name = "ramp"
+command = "python manage.py loaddata ramp"
+`)
+	f, err := config.Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if f.Database.Psql != "docker compose exec -T db psql" {
+		t.Errorf("Database.Psql = %q", f.Database.Psql)
+	}
+	if f.Migrations.Status != "alembic current" || f.Migrations.Dir != "db/migrate" {
+		t.Errorf("Migrations = %+v", f.Migrations)
+	}
+	want := []check.Seed{{Name: "ramp", Command: "python manage.py loaddata ramp"}}
+	if !reflect.DeepEqual(f.Seed, want) {
+		t.Errorf("Seed = %+v, want %+v", f.Seed, want)
 	}
 }
 
