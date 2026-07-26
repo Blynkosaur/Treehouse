@@ -11,8 +11,10 @@ import (
 type Repair struct {
 	EnvPath   string            // the .env to create or extend
 	Create    bool              // true when no .env exists yet
-	Add       map[string]string // keys to append; value sourced from source worktree ("" when unsourced)
+	Overwrite bool              // true when existing lines must be rewritten (derived values), not appended
+	Add       map[string]string // keys to write; value sourced from source worktree ("" when unsourced)
 	Unsourced []string          // keys the source couldn't supply a value for (sorted)
+	Skip      string            // non-empty => cannot act; human-readable reason (mirrors DepPlan.Skip)
 }
 
 // PlanHydrate compares w's drift against a source worktree (normally the main

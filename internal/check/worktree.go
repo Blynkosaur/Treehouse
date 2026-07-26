@@ -13,8 +13,9 @@ import (
 
 // Worktree is one checked-out working directory and every env file found in it.
 type Worktree struct {
-	Root     string
-	EnvFiles []envfile.File
+	Root        string
+	EnvFiles    []envfile.File
+	ComposeDirs []string // dirs holding a compose file (sorted); PlanDerive namespaces each
 }
 
 // skipDirs are directory names never worth descending into: huge, generated,
@@ -41,11 +42,21 @@ var envFileNames = map[string]bool{
 	".env.example": true,
 }
 
+// composeFileNames are the filenames Docker Compose itself looks for. A dir
+// holding one is a compose project root, and gets its own project name.
+var composeFileNames = map[string]bool{
+	"compose.yml":         true,
+	"compose.yaml":        true,
+	"docker-compose.yml":  true,
+	"docker-compose.yaml": true,
+}
+
 // Discover walks root and returns a Worktree holding every parsed env file.
 // It is deliberately lenient: unreadable directories and unparsable files are
 // skipped, never fatal — a doctor that faints mid-examination helps nobody.
 func Discover(root string) (Worktree, error) {
 	wt := Worktree{Root: root}
+	composeSeen := map[string]bool{} // a dir can hold both compose.yml and docker-compose.yml
 
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -62,6 +73,15 @@ func Discover(root string) (Worktree, error) {
 				// fs.SkipDir returned from a directory prunes its ENTIRE
 				// subtree — this one line is the node_modules immunity.
 				return fs.SkipDir
+			}
+			return nil
+		}
+		if composeFileNames[d.Name()] {
+			// Recorded during the same walk rather than probed later: PlanDerive
+			// is pure, so the filesystem question has to be answered here.
+			if dir := filepath.Dir(path); !composeSeen[dir] {
+				composeSeen[dir] = true
+				wt.ComposeDirs = append(wt.ComposeDirs, dir)
 			}
 			return nil
 		}
