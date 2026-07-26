@@ -200,7 +200,7 @@ func TestDefaultSignatures(t *testing.T) {
 	}
 
 	for name, line := range lines {
-		sig, matched := matchSignature(line, DefaultSignatures())
+		sig, matched := MatchSignature(line, DefaultSignatures())
 		if sig.Name != name {
 			t.Errorf("%q matched %q, want %q", line, sig.Name, name)
 		}
@@ -209,7 +209,7 @@ func TestDefaultSignatures(t *testing.T) {
 		}
 	}
 	for _, line := range extra {
-		if sig, _ := matchSignature(line, DefaultSignatures()); sig.Name == "" {
+		if sig, _ := MatchSignature(line, DefaultSignatures()); sig.Name == "" {
 			t.Errorf("no default signature matched %q", line)
 		}
 	}
@@ -222,7 +222,7 @@ func TestDefaultSignatures(t *testing.T) {
 		"TypeError: cannot read property 'x' of undefined",
 		"FAILED tests/test_api.py::test_login",
 	} {
-		if sig, _ := matchSignature(line, DefaultSignatures()); sig.Name != "" {
+		if sig, _ := MatchSignature(line, DefaultSignatures()); sig.Name != "" {
 			t.Errorf("%q matched %q — a false positive is worse than no signature", line, sig.Name)
 		}
 	}

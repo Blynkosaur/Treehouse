@@ -99,7 +99,7 @@ type TriageVerdict struct {
 // triage for every other signature.
 func Triage(output string, findings []Finding, checks []Check, sigs []Signature) TriageVerdict {
 	facts := areas(findings, checks)
-	sig, line := matchSignature(output, sigs)
+	sig, line := MatchSignature(output, sigs)
 
 	// Nothing matched: the only thing that can move the verdict off `code` is
 	// doctor being red on its own, and that is a hint, never a cause — no line
@@ -239,10 +239,14 @@ func relatedLines(facts map[string]area, except string) []string {
 	return out
 }
 
-// matchSignature returns the first signature that matches, and the line it
+// MatchSignature returns the first signature that matches, and the line it
 // matched. Order is the tiebreak: config-supplied signatures append, so a
 // built-in wins unless it was overridden by name.
-func matchSignature(output string, sigs []Signature) (Signature, string) {
+//
+// Exported for the hook, which uses it as a cheap pre-filter: no match means
+// nothing to say, and it can go silent without asking Postgres or git anything.
+// That matters because the hook runs after EVERY Bash tool call.
+func MatchSignature(output string, sigs []Signature) (Signature, string) {
 	lines := strings.Split(output, "\n")
 	for _, sig := range sigs {
 		re, err := regexp.Compile(sig.Match)

@@ -19,11 +19,12 @@ import (
 // end, because the template name, the connection and the clone name all fall
 // out of main's own .env.
 type File struct {
-	Deps       []check.DepRule `toml:"deps"`
-	Env        Env             `toml:"env"`
-	Database   Database        `toml:"database"`
-	Migrations Migrations      `toml:"migrations"`
-	Seed       []check.Seed    `toml:"seed"`
+	Deps       []check.DepRule   `toml:"deps"`
+	Env        Env               `toml:"env"`
+	Database   Database          `toml:"database"`
+	Migrations Migrations        `toml:"migrations"`
+	Seed       []check.Seed      `toml:"seed"`
+	Signature  []check.Signature `toml:"signature"`
 }
 
 // Env carries the human's judgment about env keys. Required is the whole FAIL
