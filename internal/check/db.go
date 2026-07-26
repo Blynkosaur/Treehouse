@@ -117,6 +117,11 @@ type GCInput struct {
 	Fleet    []Ref      // the worktrees that exist right now
 	Template string     // the shared database — never a candidate
 	MainRoot string     // only clones cut from THIS repo are in scope
+
+	// InUse is the database each live worktree's .env actually names. It is the
+	// only liveness test that cannot go stale, and it is what stops gc dropping
+	// a database out from under a checkout somebody is working in — see PlanGC.
+	InUse []string
 }
 
 // DBDrop is one database gc would remove, with everything a human needs to
@@ -134,12 +139,20 @@ type DBDrop struct {
 // the whole safety model, and it is why Owned is the input rather than every
 // database in the cluster.
 //
-// Liveness is checked two ways, and either one spares a database. The branch is
-// the honest test — a clone is a corpse exactly when its worktree is gone — and
-// it is what the comment exists to record. The derived name is the belt: it
-// costs one map lookup and it means a template renamed since the clones were
-// cut (app_dev -> app_development) can't turn the whole live fleet into
-// candidates, which is the one way this could delete somebody's work.
+// Liveness is checked three ways, and any one of them spares a database.
+//
+// The branch is the cheap test — a clone is usually a corpse exactly when its
+// worktree is gone — and it is what the comment exists to record. The derived
+// name is the belt: it costs one map lookup and it means a template renamed
+// since the clones were cut (app_dev -> app_development) can't turn the whole
+// live fleet into candidates.
+//
+// InUse is the one that actually holds. Both name-based tests fail the moment a
+// worktree's BRANCH stops matching the comment, which two ordinary git commands
+// do: `git checkout --detach` (a bisect, a sha checkout) and `git branch -m`.
+// The worktree is still there, its .env still names the clone, somebody is still
+// working in it — and gc offered to drop it. Nothing recovers from that, so the
+// last word belongs to the file the app actually reads.
 func (d Doctor) PlanGC(in GCInput) []DBDrop {
 	liveBranch := map[string]bool{}
 	liveName := map[string]bool{}
@@ -157,7 +170,7 @@ func (d Doctor) PlanGC(in GCInput) []DBDrop {
 		switch {
 		case !ok, root != in.MainRoot:
 			continue // somebody else's comment, or another repo's clone
-		case liveBranch[branch], liveName[db.Name]:
+		case liveBranch[branch], liveName[db.Name], slices.Contains(in.InUse, db.Name):
 			continue // still in use
 		case db.Name == in.Template:
 			// Unreachable through the comment — treehouse never writes one on a

@@ -109,7 +109,25 @@ func planGC(fleet []check.Ref, mainRoot string) ([]check.DBDrop, error) {
 		Fleet:    fleet,
 		Template: check.EnvDB(source),
 		MainRoot: mainRoot,
+		InUse:    inUse(fleet),
 	}), nil
+}
+
+// inUse is the database each live worktree's .env actually names — the liveness
+// test a branch name cannot give us. One tree walk per worktree, which `th ls`
+// already pays per row and gc can certainly afford: it is about to drop
+// somebody's data. A worktree that has been removed from disk answers nothing,
+// which is exactly what makes `th rm`'s teardown still work.
+func inUse(fleet []check.Ref) []string {
+	var dbs []string
+	for _, ref := range fleet {
+		if w, err := check.Discover(ref.Path); err == nil {
+			if db := check.EnvDB(w); db != "" {
+				dbs = append(dbs, db)
+			}
+		}
+	}
+	return dbs
 }
 
 // collect drops each planned database, and refuses any that still has

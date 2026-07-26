@@ -111,6 +111,28 @@ func TestPlanGC(t *testing.T) {
 			want: []string{"app_wt_feat_gone"},
 		},
 		{
+			// Both name-based tests read the BRANCH, and two everyday git commands
+			// break that link while the worktree carries on existing. gc offering
+			// to drop the database a checkout is actively pointed at is the one
+			// unrecoverable thing in this repo, so the .env gets the last word.
+			name: "a live worktree that detached its HEAD keeps its clone",
+			in: GCInput{
+				Owned:    []Database{owned("app_wt_feat_a", main, "feat/a")},
+				Fleet:    []Ref{{Path: main, Branch: "main"}, {Path: "/repo-feat"}},
+				InUse:    []string{"app_wt_feat_a"},
+				Template: "app", MainRoot: main,
+			},
+		},
+		{
+			name: "a live worktree whose branch was renamed keeps its clone",
+			in: GCInput{
+				Owned:    []Database{owned("app_wt_feat_a", main, "feat/a")},
+				Fleet:    []Ref{{Path: main, Branch: "main"}, {Path: "/repo-feat", Branch: "feat/a-renamed"}},
+				InUse:    []string{"app_wt_feat_a"},
+				Template: "app", MainRoot: main,
+			},
+		},
+		{
 			name: "sorted, so the confirmation list is stable",
 			in: GCInput{
 				Owned: []Database{
