@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
@@ -29,15 +30,21 @@ func init() {
 	hydrateCmd.Flags().BoolVar(&hydrateSkipDeps, "skip-deps", false, "only fill .env; skip dependency provisioning")
 }
 
-// runHydrate is a pure adapter (same shape as runDoctor): discover this
-// worktree and the main checkout, let check.PlanHydrate decide the fixes, then
-// apply them with the byte-preserving envfile writers. All judgment lives in
-// check — this file only gathers input, writes files, and talks to the terminal.
+// runHydrate is a pure adapter (same shape as runDoctor): gather cwd, hand the
+// work to hydrateAll. All judgment lives in check.
 func runHydrate(cmd *cobra.Command, args []string) error {
 	root, err := os.Getwd()
 	if err != nil {
 		return err
 	}
+	return hydrateAll(root)
+}
+
+// hydrateAll runs the whole pipeline against root, in strict order: fill
+// canonical → provision deps → derive per-worktree values. Derive goes last so
+// we never point a derived value at a broken env. `th new` calls this too —
+// that's why it isn't inlined into runHydrate.
+func hydrateAll(root string) error {
 	wt, err := check.Discover(root)
 	if err != nil {
 		return err
@@ -54,33 +61,51 @@ func runHydrate(cmd *cobra.Command, args []string) error {
 	}
 
 	repairs := check.Doctor{}.PlanHydrate(wt, source)
-	// A clean env phase is a note, not an exit: the deps phase below still runs.
+	// A clean env phase is a note, not an exit: the phases below still run.
 	if len(repairs) == 0 {
 		fmt.Println("nothing to hydrate — every .env already has its keys")
 	}
+	if err := applyRepairs(root, repairs); err != nil {
+		return err
+	}
 
+	hydrateDeps(root, wt, source, sourceRoot)
+	return hydrateDerive(root, sourceRoot, source)
+}
+
+// applyRepairs turns plans into writes and narrates them. The three writers
+// share a signature precisely so this stays one loop and one switch.
+func applyRepairs(root string, repairs []check.Repair) error {
 	for _, r := range repairs {
 		rel := relDir(root, filepath.Dir(r.EnvPath))
-		n := nKeys(len(r.Add))
 
 		switch {
+		case r.Skip != "":
+			fmt.Printf("• %s: skipped (%s)\n", rel, r.Skip)
 		case hydrateDry && r.Create:
-			fmt.Printf("~ %s: would create .env (%s)\n", rel, n)
+			fmt.Printf("~ %s: would create .env (%s)\n", rel, nKeys(len(r.Add)))
+		case hydrateDry && r.Overwrite:
+			fmt.Printf("~ %s: would set %s\n", rel, keyList(r.Add))
 		case hydrateDry:
-			fmt.Printf("~ %s: would add %s\n", rel, n)
+			fmt.Printf("~ %s: would add %s\n", rel, nKeys(len(r.Add)))
 		default:
-			// Create and Append share a signature, so pick one and call it.
 			apply := envfile.Append
-			if r.Create {
+			switch {
+			case r.Create:
 				apply = envfile.Create
+			case r.Overwrite:
+				apply = envfile.Set // derived values replace what's there
 			}
 			if err := apply(r.EnvPath, r.Add); err != nil {
 				return fmt.Errorf("%s: %w", rel, err)
 			}
-			if r.Create {
-				fmt.Printf("✓ %s: created .env (%s)\n", rel, n)
-			} else {
-				fmt.Printf("✓ %s: added %s\n", rel, n)
+			switch {
+			case r.Create:
+				fmt.Printf("✓ %s: created .env (%s)\n", rel, nKeys(len(r.Add)))
+			case r.Overwrite:
+				fmt.Printf("✓ %s: set %s\n", rel, keyList(r.Add))
+			default:
+				fmt.Printf("✓ %s: added %s\n", rel, nKeys(len(r.Add)))
 			}
 		}
 
@@ -90,17 +115,21 @@ func runHydrate(cmd *cobra.Command, args []string) error {
 			fmt.Printf("    fill manually (no value in main): %s\n", strings.Join(r.Unsourced, ", "))
 		}
 	}
-
-	return hydrateDeps(root, wt, source, sourceRoot)
+	return nil
 }
 
 // hydrateDeps provisions heavy dependency dirs (node_modules, .venv, …) into
 // this worktree. Rules come from the built-in defaults overlaid with any
 // treehouse.toml in main — the source of truth. All judgment lives in
 // check.PlanDeps; this loop only applies plans and talks to the terminal.
-func hydrateDeps(root string, wt, source check.Worktree, sourceRoot string) error {
+//
+// Failures are printed red, never returned: a missing node_modules is a red
+// line in the report, not a reason to abandon the worktree half-built.
+// ponytail: the clone is a CoW copy of main's tree, so an npm install running
+// in main at the same moment can yield a torn copy. Accepted, not handled.
+func hydrateDeps(root string, wt, source check.Worktree, sourceRoot string) {
 	if hydrateSkipDeps {
-		return nil
+		return
 	}
 
 	cfg, _ := config.Load(sourceRoot) // absent/broken config: fall back to defaults
@@ -109,7 +138,7 @@ func hydrateDeps(root string, wt, source check.Worktree, sourceRoot string) erro
 	plans := check.Doctor{}.PlanDeps(wt, source, rules)
 	if len(plans) == 0 {
 		fmt.Println("deps: nothing to provision")
-		return nil
+		return
 	}
 
 	for _, p := range plans {
@@ -124,18 +153,81 @@ func hydrateDeps(root string, wt, source check.Worktree, sourceRoot string) erro
 			fmt.Printf("~ %s: would recreate (%s)\n", rel, p.Command)
 		case p.Action == check.Clone:
 			if err := deps.CloneTree(p.Src, p.Dst); err != nil {
-				return fmt.Errorf("%s: %w", rel, err)
+				fmt.Printf("✗ %s: clone failed: %v\n", rel, err)
+				continue
 			}
 			fmt.Printf("✓ %s: cloned\n", rel)
 		default:
 			fmt.Printf("~ %s: recreating (%s)\n", rel, p.Command)
 			if err := deps.RunRecreate(filepath.Dir(p.Dst), p.Command); err != nil {
-				return fmt.Errorf("%s: %w", rel, err)
+				fmt.Printf("✗ %s: recreate failed: %v\n", rel, err)
+				continue
 			}
 			fmt.Printf("✓ %s: recreated\n", rel)
 		}
 	}
-	return nil
+}
+
+// hydrateDerive writes this worktree's private compose project name and port
+// offsets (E2/E3). It gathers what PlanDerive can't see — the branch, the app
+// name, the sibling worktrees that form the port registry — and applies the plan.
+func hydrateDerive(root, sourceRoot string, source check.Worktree) error {
+	// Re-discover: the fill phase just created .env files that did not exist
+	// when the caller walked this worktree, and derive can only rewrite files it
+	// can see. Skipping this makes derive a no-op on every `th new`.
+	wt, err := check.Discover(root)
+	if err != nil {
+		return err
+	}
+
+	refs, err := check.Worktrees(root)
+	if err != nil {
+		return err
+	}
+	branch := filepath.Base(root) // detached, bare, or run from a subdir
+	var fleet []check.Worktree
+	for _, ref := range refs {
+		switch {
+		case samePath(ref.Path, root):
+			if ref.Branch != "" {
+				branch = ref.Branch
+			}
+		case samePath(ref.Path, sourceRoot):
+			// main is passed as `source`; counting it twice would be harmless
+			// but the fleet is documented as "the others".
+		default:
+			if other, err := check.Discover(ref.Path); err == nil {
+				fleet = append(fleet, other)
+			}
+		}
+	}
+
+	in := check.DeriveInput{App: resolveApp(source, sourceRoot), Slug: check.Slug(branch), Fleet: fleet}
+	return applyRepairs(root, check.Doctor{}.PlanDerive(wt, source, in))
+}
+
+// resolveApp names the compose project family. If main's root .env already
+// declares COMPOSE_PROJECT_NAME, the app has named itself — reuse it, so main's
+// own containers keep the name they have. Otherwise use Docker Compose's own
+// default rule: the project directory's name.
+func resolveApp(source check.Worktree, sourceRoot string) string {
+	if name := source.EnvVarsByDir()["."]["COMPOSE_PROJECT_NAME"]; name != "" {
+		return name
+	}
+	return check.Slug(filepath.Base(sourceRoot))
+}
+
+// samePath compares paths through symlinks: git reports /private/var where
+// os.Getwd may report /var. Getting this wrong would put a worktree in its own
+// port registry, and its ports would move on every hydrate.
+func samePath(a, b string) bool {
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return p
+	}
+	return resolve(a) == resolve(b)
 }
 
 // nKeys pluralizes a key count for human output ("1 key", "3 keys").
@@ -144,4 +236,15 @@ func nKeys(n int) string {
 		return "1 key"
 	}
 	return fmt.Sprintf("%d keys", n)
+}
+
+// keyList names the keys a repair writes — for derived values the names matter
+// more than the count ("set COMPOSE_PROJECT_NAME, PORT").
+func keyList(vars map[string]string) string {
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ", ")
 }
