@@ -237,3 +237,250 @@ func readFile(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// setCases are the values a derived key can plausibly carry plus the ones that
+// have historically broken naive .env writers. Each asserts the same three
+// things: the bytes on disk, what Parse reads back, and that a second identical
+// call changes nothing (non-idempotence means every hydrate makes a diff).
+func TestSetHostileValues(t *testing.T) {
+	cases := []struct {
+		name    string
+		initial string
+		key     string
+		val     string
+		want    string
+	}{
+		{"value containing equals", "A=1\n", "A", "b=c", "A=b=c\n"},
+		{"value that is a url", "A=1\n", "A", "postgres://u:p@h/db?x=1", "A=postgres://u:p@h/db?x=1\n"},
+		{"empty value", "A=1\n", "A", "", "A=\n"},
+		{"padded value keeps its spaces", "A=1\n", "A", " pad ", "A=\" pad \"\n"},
+		{"value with a hash", "A=1\n", "A", "a#b", "A=\"a#b\"\n"},
+		{"value with a tab", "A=1\n", "A", "a\tb", "A=\"a\tb\"\n"},
+		{"value that looks quoted", "A=1\n", "A", `"q"`, "A=\"\\\"q\\\"\"\n"},
+		{"value with an apostrophe", "A=1\n", "A", "it's", "A=\"it's\"\n"},
+		{"value with backslashes", "A=1\n", "A", `c:\p\x`, `A=c:\p\x` + "\n"},
+		// PORT must not match PORTAL: a prefix rewrite would silently move a
+		// service nobody asked about.
+		{"key that prefixes another", "PORT=1\nPORTAL=2\n", "PORT", "9", "PORT=9\nPORTAL=2\n"},
+		{"key that is suffixed by another", "PORT=1\nPORTAL=2\n", "PORTAL", "9", "PORT=1\nPORTAL=9\n"},
+		{"whitespace around the key", "  PORT = 3000  \n", "PORT", "9", "PORT=9\n"},
+		{"blank lines between keys survive", "A=1\n\n\nB=2\n", "A", "9", "A=9\n\n\nB=2\n"},
+		{"file of only comments is not truncated", "# a\n# b\n", "A", "1", "# a\n# b\nA=1\n"},
+		{"empty file", "", "A", "1", "A=1\n"},
+		// A BOM belongs to the editor, not the key: without stripping it the
+		// first key parses as "\ufeffA" and Set appends a duplicate A.
+		{"leading BOM", "\ufeffA=1\n", "A", "2", "A=2\n"},
+		{"quoted value in file is replaced whole", `A="old val"` + "\n", "A", "new", "A=new\n"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".env")
+			if err := os.WriteFile(path, []byte(c.initial), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := Set(path, map[string]string{c.key: c.val}); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+			got := readFile(t, path)
+			if got != c.want {
+				t.Errorf("Set()\n  got:  %q\n  want: %q", got, c.want)
+			}
+			if vars, _ := Parse(got); vars[c.key] != c.val {
+				t.Errorf("round trip: Parse gave %q, want %q\n  file: %q", vars[c.key], c.val, got)
+			}
+			// Five more calls: a writer that is not a fixed point makes every
+			// `th hydrate` produce a spurious diff.
+			for i := 0; i < 5; i++ {
+				if err := Set(path, map[string]string{c.key: c.val}); err != nil {
+					t.Fatalf("repeat Set %d: %v", i, err)
+				}
+			}
+			if again := readFile(t, path); again != got {
+				t.Errorf("Set is not a fixed point\n  after 1: %q\n  after 6: %q", got, again)
+			}
+		})
+	}
+}
+
+// TestSetParseAgree is the property the whole design rests on: Set's match rule
+// is Parse's rule. For any file, setting a key Parse reported must change THAT
+// key's parsed value and nothing else.
+func TestSetParseAgree(t *testing.T) {
+	corpus := []string{
+		"A=1\nB=2\n",
+		"# lead\nA=1\n\nB = 2 \n# trail\n",
+		"A=1\r\nB=2\r\n",
+		"A=1",
+		"export A=1\nA=2\n",
+		"A=\nB=\"quoted val\"\nC='single'\n",
+		"\ufeffA=1\nB=2\n",
+		"A=1\nA=2\nA=3\n",
+		"garbage line\nA=1\n",
+		"PORT=3000\nPORTAL=x\nADMIN_PORT=3001\n",
+		"A=b=c\nB=#notacomment\n",
+	}
+	for _, content := range corpus {
+		before, err := Parse(content)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", content, err)
+		}
+		for key := range before {
+			t.Run(content+"/"+key, func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), ".env")
+				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := Set(path, map[string]string{key: "SENTINEL"}); err != nil {
+					t.Fatalf("Set(%q): %v", key, err)
+				}
+				after, err := Parse(readFile(t, path))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if after[key] != "SENTINEL" {
+					t.Errorf("Set(%q) did not take: Parse reads %q\n  file: %q", key, after[key], readFile(t, path))
+				}
+				for k, v := range before {
+					if k != key && after[k] != v {
+						t.Errorf("Set(%q) collaterally changed %q: %q -> %q", key, k, v, after[k])
+					}
+				}
+				if len(after) != len(before) {
+					t.Errorf("Set(%q) changed the key set: %v -> %v", key, before, after)
+				}
+			})
+		}
+	}
+}
+
+// TestSetRejectsUnrepresentable: a pair the format cannot hold must be an error
+// with the file untouched, never a best-effort write. A newline in a value used
+// to inject a second key and re-append it on every run.
+func TestSetRejectsUnrepresentable(t *testing.T) {
+	cases := []struct {
+		name string
+		vars map[string]string
+	}{
+		{"newline in value", map[string]string{"A": "x\nEVIL=1"}},
+		{"carriage return in value", map[string]string{"A": "x\rEVIL=1"}},
+		{"empty key", map[string]string{"": "1"}},
+		{"key containing equals", map[string]string{"A=B": "1"}},
+		{"key that is a comment", map[string]string{"# A": "1"}},
+		{"key with surrounding space", map[string]string{" A ": "1"}},
+		{"newline in key", map[string]string{"A\nB": "1"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".env")
+			const original = "# precious\nA=1\n"
+			if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			for name, write := range map[string]func(string, map[string]string) error{"Set": Set, "Append": Append} {
+				if err := write(path, c.vars); err == nil {
+					t.Errorf("%s accepted %v", name, c.vars)
+				}
+				if got := readFile(t, path); got != original {
+					t.Fatalf("%s touched the file anyway: %q", name, got)
+				}
+			}
+		})
+	}
+}
+
+// TestSetFollowsSymlink: a .env symlinked at a shared secrets file is a real
+// layout. temp+rename replaces the LINK, which would freeze the file every other
+// tool still reads at its old values while treehouse believes it wrote.
+func TestSetFollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "shared.env")
+	link := filepath.Join(dir, ".env")
+	if err := os.WriteFile(target, []byte("A=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := Set(link, map[string]string{"A": "2"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, target); got != "A=2\n" {
+		t.Errorf("symlink target = %q, want A=2 — the write went to the link instead", got)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error(".env is no longer a symlink — rename replaced it")
+	}
+}
+
+// TestSetLeavesNoDebris: the temp file is an implementation detail. One that
+// survives a failure would be picked up by nothing, but committed by someone.
+func TestSetLeavesNoDebris(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte("A=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Set(path, map[string]string{"A": "2"}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != ".env" {
+		t.Errorf("directory holds %v, want just .env", entries)
+	}
+}
+
+// TestSetFailureIsAtomic: an unwritable directory must leave the original file
+// exactly as it was, not a truncated one.
+func TestSetFailureIsAtomic(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	const original = "# hand-filled\nA=1\nSECRET=x\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o755) //nolint // t.TempDir cleanup needs it writable again
+
+	if err := Set(path, map[string]string{"A": "2"}); err == nil {
+		t.Fatal("Set into a read-only directory reported success")
+	}
+	if got := readFile(t, path); got != original {
+		t.Errorf("original damaged by a failed write:\n%q", got)
+	}
+}
+
+func TestParseUnquote(t *testing.T) {
+	cases := []struct{ line, want string }{
+		{`A="abc"`, "abc"},
+		{`A='abc'`, "abc"},
+		{`A=abc`, "abc"},
+		{`A=""`, ""},
+		{`A="\"q\""`, `"q"`},   // exactly what quote() writes for the value `"q"`
+		{`A="abc`, `"abc`},     // unbalanced: not a quoted value, leave it alone
+		{`A=abc"`, `abc"`},     //
+		{`A="a" "b"`, `a" "b`}, // one pair off the ends, not every quote
+		{`A='it''s'`, `it''s`},
+	}
+	for _, c := range cases {
+		vars, err := Parse(c.line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if vars["A"] != c.want {
+			t.Errorf("Parse(%q)[A] = %q, want %q", c.line, vars["A"], c.want)
+		}
+	}
+}

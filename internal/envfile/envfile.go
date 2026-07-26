@@ -2,6 +2,7 @@ package envfile
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,20 +33,44 @@ func Parse(envContent string) (map[string]string, error) {
 	envmap := make(map[string]string)
 
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-
-		key, val, found := strings.Cut(line, "=")
-		if found {
-			key = strings.TrimSpace(key)
-			val = strings.TrimSpace(val)
-			val = strings.Trim(val, `"'`)
+		if key, val, ok := splitLine(scanner.Text()); ok {
 			envmap[key] = val
 		}
 	}
 	return envmap, scanner.Err()
+}
+
+// splitLine is THE rule for what a line declares — Parse reads values with it,
+// Set matches keys with it. One function rather than two copies: a Set that
+// matched keys Parse doesn't read (or vice versa) would edit a line nobody
+// loads. A leading BOM is noise an editor left behind, not part of the key.
+func splitLine(line string) (key, val string, ok bool) {
+	line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", "", false
+	}
+	k, v, found := strings.Cut(line, "=")
+	if !found {
+		return "", "", false
+	}
+	return strings.TrimSpace(k), unquote(strings.TrimSpace(v)), true
+}
+
+// unquote reverses quote: exactly ONE surrounding pair of matching quotes, plus
+// \" inside a double-quoted value. Trimming every quote character off both ends
+// instead turned the value `"q"` — which quote had written as "\"q\"" — into
+// `\"q\`. quote and Parse have to be inverses or Set corrupts on a round trip.
+func unquote(v string) string {
+	if len(v) < 2 || v[0] != v[len(v)-1] {
+		return v
+	}
+	switch v[0] {
+	case '"':
+		return strings.ReplaceAll(v[1:len(v)-1], `\"`, `"`)
+	case '\'':
+		return v[1 : len(v)-1]
+	}
+	return v
 }
 
 // Marker introduces every block of keys treehouse adds to an env file.
@@ -57,6 +82,9 @@ const Marker = "# --- added by treehouse hydrate ---"
 func Append(path string, vars map[string]string) error {
 	if len(vars) == 0 {
 		return nil
+	}
+	if err := checkVars(vars); err != nil {
+		return err
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -89,6 +117,15 @@ func Append(path string, vars map[string]string) error {
 func Set(path string, vars map[string]string) error {
 	if len(vars) == 0 {
 		return nil
+	}
+	if err := checkVars(vars); err != nil {
+		return err
+	}
+	// A .env symlinked into a shared secrets dir is a real layout, and rename
+	// replaces the LINK — leaving the file everything else still reads frozen at
+	// the old values. Write through to what the link points at.
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
 	}
 	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -158,25 +195,36 @@ func Set(path string, vars map[string]string) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// lineKey returns the key a line declares, or "" for none. The rule is Parse's,
-// character for character — a Set that matched keys Parse doesn't read (or vice
-// versa) would edit a line nobody loads. Consequence: "export PORT=3000" has key
-// "export PORT" here too, so Set(PORT) leaves it alone.
+// lineKey returns the key a line declares, or "" for none. Consequence of
+// sharing splitLine with Parse: "export PORT=3000" has key "export PORT" here
+// too, so Set(PORT) leaves it alone.
 func lineKey(line string) string {
-	line = strings.TrimSpace(line)
-	if line == "" || strings.HasPrefix(line, "#") {
-		return ""
+	key, _, _ := splitLine(line)
+	return key
+}
+
+// checkVars rejects pairs that cannot survive the file format. A value with a
+// newline in it writes a SECOND line, which Parse then reads back as an extra
+// key — and every later Set appends it again, growing the file forever. A key
+// that isn't its own lineKey can never be matched on the next pass, so it too
+// gets appended on every run. Both are silent corruption of a file no one can
+// regenerate, so they are errors, not best-effort writes.
+func checkVars(vars map[string]string) error {
+	for k, v := range vars {
+		if strings.ContainsAny(k, "\r\n") || strings.ContainsAny(v, "\r\n") {
+			return fmt.Errorf("%q: a newline is not representable in a .env line", k)
+		}
+		if k == "" || lineKey(k+"=") != k {
+			return fmt.Errorf("%q is not a usable env key", k)
+		}
 	}
-	key, _, found := strings.Cut(line, "=")
-	if !found {
-		return ""
-	}
-	return strings.TrimSpace(key)
+	return nil
 }
 
 // quote wraps values that Parse would otherwise mangle (it trims whitespace and
-// strips outer quotes). ponytail: escaping is one level deep — a value with an
-// embedded quote survives the write but not a byte-exact round trip.
+// strips outer quotes). unquote is its exact inverse, so Parse(Set(k,v))[k] == v
+// for every value the format can hold. ponytail: escaping is one level deep —
+// enough for a round trip, not a full shell-quoting implementation.
 func quote(v string) string {
 	if !strings.ContainsAny(v, " \t#\"'") {
 		return v
@@ -187,6 +235,9 @@ func quote(v string) string {
 // Create writes a brand-new env file from vars. It refuses to overwrite:
 // an existing file at path is an error, never a casualty.
 func Create(path string, vars map[string]string) error {
+	if err := checkVars(vars); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
