@@ -34,7 +34,7 @@ const maintenanceDB = "postgres"
 // Databases lists every database in the cluster — check.DBInput's Existing,
 // asked once. Its error doubles as the "is Postgres even reachable" answer.
 func Databases() ([]string, error) {
-	out, err := psql("-c", "SELECT datname FROM pg_database")
+	out, err := psql("SELECT datname FROM pg_database")
 	if err != nil {
 		return nil, err
 	}
@@ -74,9 +74,9 @@ func Sessions(db string) ([]string, error) {
 	if err := checkIdent(db); err != nil {
 		return nil, err
 	}
-	out, err := psql("--set=db="+db, "-c",
+	out, err := psql(
 		`SELECT pid || '  ' || coalesce(nullif(application_name, ''), '?') || '  ' || coalesce(host(client_addr), 'local')
-		 FROM pg_stat_activity WHERE datname = :'db'`)
+		 FROM pg_stat_activity WHERE datname = :'db'`, "--set=db="+db)
 	if err != nil {
 		return nil, err
 	}
@@ -96,9 +96,9 @@ func Terminate(db string) error {
 	if err := checkIdent(db); err != nil {
 		return err
 	}
-	_, err := psql("--set=db="+db, "-c",
+	_, err := psql(
 		`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-		 WHERE datname = :'db' AND pid <> pg_backend_pid()`)
+		 WHERE datname = :'db' AND pid <> pg_backend_pid()`, "--set=db="+db)
 	return err
 }
 
@@ -112,7 +112,7 @@ func Comment(db, text string) error {
 	}
 	// db is validated and interpolated (an identifier cannot be a bind
 	// parameter); text goes through psql's :'c', which quotes it as a literal.
-	_, err := psql("--set=c="+text, "-c", "COMMENT ON DATABASE "+db+" IS :'c'")
+	_, err := psql("COMMENT ON DATABASE "+db+" IS :'c'", "--set=c="+text)
 	return err
 }
 
@@ -131,16 +131,26 @@ func checkIdent(names ...string) error {
 	return nil
 }
 
-// psql runs one statement and returns its bare rows. Arguments are passed as
-// argv — never through a shell, which is the other half of the guard above.
-func psql(args ...string) (string, error) {
+// psql runs one statement and returns its bare rows. args carries the --set
+// pairs the statement reads back as :'name'. Everything is passed as argv —
+// never through a shell, which is the other half of the guard above.
+//
+// The statement goes in on STDIN rather than through -c, and that is not a
+// style choice: psql hands a -c string straight to the server without
+// substituting its own variables, so `IS :'c'` reached Postgres verbatim and
+// came back a syntax error. Stdin is the path that interpolates — and quotes
+// the value while it does it, which is the whole reason we use :'name' instead
+// of building the SQL ourselves.
+func psql(sql string, args ...string) (string, error) {
 	full := append([]string{
 		"-d", maintenanceDB,
 		"-At",         // bare tuples: no headers, no alignment to parse around
 		"--no-psqlrc", // a user's .psqlrc must not shape what we read back
 		"-v", "ON_ERROR_STOP=1",
 	}, args...)
-	out, err := exec.Command("psql", full...).CombinedOutput()
+	cmd := exec.Command("psql", full...)
+	cmd.Stdin = strings.NewReader(sql)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("psql: %v: %s", err, strings.TrimSpace(string(out)))
 	}

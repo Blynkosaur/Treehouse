@@ -90,7 +90,7 @@ func TestCloneRoundTrip(t *testing.T) {
 	if err := Comment(name, provenance); err != nil {
 		t.Fatalf("Comment: %v", err)
 	}
-	got, err := psql("-c", "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = '"+name+"'")
+	got, err := psql("SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = '" + name + "'")
 	if err != nil {
 		t.Fatalf("reading the comment back: %v", err)
 	}
