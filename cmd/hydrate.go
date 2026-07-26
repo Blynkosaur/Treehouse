@@ -85,6 +85,11 @@ func applyRepairs(root string, repairs []check.Repair) error {
 		if r.Skip != "" {
 			say("• %s: skipped (%s)\n", rel, r.Skip)
 		}
+		// A warn means we DID act, on a call the human should know about — so it
+		// prints even when the repair itself is otherwise silent.
+		if r.Warn != "" {
+			say("! %s: %s\n", rel, r.Warn)
+		}
 		if len(r.Add) == 0 {
 			continue
 		}

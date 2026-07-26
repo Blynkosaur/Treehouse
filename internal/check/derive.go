@@ -3,7 +3,9 @@ package check
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"hash/fnv"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -63,9 +65,10 @@ func Slug(branch string) string {
 // DeriveInput is everything PlanDerive can't work out for itself. cmd gathers
 // it — the planner stays pure, so it stays testable from struct literals.
 type DeriveInput struct {
-	App   string     // compose project prefix, resolved by cmd
-	Slug  string     // Slug(branch) for this worktree
-	Fleet []Worktree // the OTHER worktrees: the port registry
+	App    string     // compose project prefix, resolved by cmd
+	Slug   string     // Slug(branch) for this worktree
+	Fleet  []Worktree // the OTHER worktrees: the port registry
+	DBName string     // this worktree's database clone; "" when none exists to point at
 }
 
 const (
@@ -75,10 +78,12 @@ const (
 )
 
 // PlanDerive plans the per-worktree derived values: a private compose project
-// (E2) and a private set of ports (E3). Both are pure functions of the slug and
-// what the neighbours already declare, so the same branch always derives the
-// same values — the registry IS the sibling .env files, there is no state file
-// to keep in sync or garbage-collect.
+// (E2), a private set of ports (E3), and a .env pointed at this worktree's own
+// database (A2). E2 and E3 are pure functions of the slug and what the
+// neighbours already declare, so the same branch always derives the same values
+// — the registry IS the sibling .env files, there is no state file to keep in
+// sync or garbage-collect. A2 is a function of in.DBName, which cmd fills in
+// only once the clone is confirmed to exist.
 //
 // Repairs come back Overwrite: derived values replace whatever is there, unlike
 // PlanHydrate's append-only fills.
@@ -118,7 +123,26 @@ func (d Doctor) PlanDerive(w, source Worktree, in DeriveInput) []Repair {
 			// Annotate the root repair rather than replacing it — ports and the
 			// compose project are separate concerns, and a port skip must not
 			// take E2's namespacing down with it.
-			at(w.Root).Skip = "no free port offset — every one of the 200 collides with a sibling worktree"
+			at(w.Root).Skip = note(at(w.Root).Skip, "no free port offset — every one of the 200 collides with a sibling worktree")
+		}
+	}
+
+	// A2: every service main declares a database for now points at this
+	// worktree's clone. Keyed off SOURCE for the same reason ports are — main's
+	// files are what say which services have a database at all, and the relative
+	// dir maps them onto ours.
+	if in.DBName != "" {
+		for rel, vars := range source.EnvVarsByDir() {
+			add, warn, skip := repointDB(vars, in.DBName)
+			if len(add) == 0 && warn == "" && skip == "" {
+				continue // this dir declares no database; nothing to say about it
+			}
+			r := at(filepath.Join(w.Root, rel))
+			for key, val := range add {
+				r.Add[key] = val
+			}
+			r.Warn = warn
+			r.Skip = note(r.Skip, skip)
 		}
 	}
 
@@ -128,6 +152,60 @@ func (d Doctor) PlanDerive(w, source Worktree, in DeriveInput) []Repair {
 	}
 	sort.Slice(repairs, func(i, j int) bool { return repairs[i].EnvPath < repairs[j].EnvPath })
 	return repairs
+}
+
+// repointDB rewrites one directory's database declarations to name db, or says
+// why it left them alone. The two keys move together or not at all: pointing
+// POSTGRES_DB at the clone while DATABASE_URL still names the shared database
+// is the exact failure a database per worktree exists to prevent, and it would
+// be invisible — doctor reads one key, the ORM dials the other.
+func repointDB(vars map[string]string, db string) (add map[string]string, warn, skip string) {
+	raw, hasURL := vars["DATABASE_URL"]
+	old, hasDB := vars["POSTGRES_DB"]
+	switch {
+	case !hasURL && !hasDB:
+		return nil, "", ""
+	case !hasURL:
+		return map[string]string{"POSTGRES_DB": db}, "", ""
+	}
+
+	was, ok := DBFromURL(raw)
+	if !ok {
+		// The reason names the key and not the value: a connstring carries a
+		// password, and a skip line is printed to a terminal and pasted into
+		// issues. ponytail: one reason covers unparseable, non-postgres and
+		// path-less URLs — split it when someone can't tell which they hit.
+		return nil, "", "DATABASE_URL is not a postgres URL naming a database — leaving the database keys alone"
+	}
+	// Guarded by DBFromURL: a URL that parsed there parses here.
+	u, _ := url.Parse(raw)
+	u.Path = "/" + db
+
+	add = map[string]string{"DATABASE_URL": u.String()}
+	if hasDB {
+		add["POSTGRES_DB"] = db
+		if old != was {
+			// Both keys exist and disagree in MAIN — a pre-existing mess we are
+			// about to make consistent. DATABASE_URL wins because it is what an
+			// ORM actually dials, but say so: the resolution changes which
+			// database the POSTGRES_DB half of the app was talking to.
+			warn = fmt.Sprintf("main disagrees with itself: DATABASE_URL names %q, POSTGRES_DB names %q — following DATABASE_URL", was, old)
+		}
+	}
+	return add, warn, ""
+}
+
+// note joins two reasons about one .env. Ports and databases are separate
+// concerns that both land on the root file, and the second must not erase the
+// first.
+func note(existing, add string) string {
+	switch {
+	case add == "":
+		return existing
+	case existing == "":
+		return add
+	}
+	return existing + "; " + add
 }
 
 // portValue reads a port declaration, or reports that the key isn't one.

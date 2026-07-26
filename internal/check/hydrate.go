@@ -15,6 +15,7 @@ type Repair struct {
 	Add       map[string]string // keys to write; value sourced from source worktree ("" when unsourced)
 	Unsourced []string          // keys the source couldn't supply a value for (sorted)
 	Skip      string            // non-empty => cannot act; human-readable reason (mirrors DepPlan.Skip)
+	Warn      string            // acted, but on a judgment call the human should see (mirrors Skip's voice)
 }
 
 // PlanHydrate compares w's drift against a source worktree (normally the main

@@ -372,6 +372,166 @@ func TestPlanDerivePortCeiling(t *testing.T) {
 	}
 }
 
+// TestPlanDeriveDB is A2: the .env points at the clone hydrate just made. The
+// URL cases are the whole reason DBFromURL uses net/url — every one of them is a
+// connstring a regex gets wrong.
+func TestPlanDeriveDB(t *testing.T) {
+	cases := []struct {
+		name     string
+		vars     map[string]string
+		wantURL  string
+		wantDB   string // "" = POSTGRES_DB must not be written
+		wantSkip bool
+		wantWarn bool
+	}{
+		{
+			name:    "query params survive the rewrite",
+			vars:    map[string]string{"DATABASE_URL": "postgres://u:p@localhost:5432/app_dev?sslmode=require"},
+			wantURL: "postgres://u:p@localhost:5432/app_wt_x?sslmode=require",
+		},
+		{
+			// The @ inside the password is what makes a regex eat the wrong half.
+			name:    "password containing an at-sign",
+			vars:    map[string]string{"DATABASE_URL": "postgres://u:p@ss@localhost/app_dev"},
+			wantURL: "postgres://u:p%40ss@localhost/app_wt_x",
+		},
+		{
+			name:    "non-default port",
+			vars:    map[string]string{"DATABASE_URL": "postgresql://localhost:6543/app_dev"},
+			wantURL: "postgresql://localhost:6543/app_wt_x",
+		},
+		{
+			name:     "a non-postgres scheme is not ours to rewrite",
+			vars:     map[string]string{"DATABASE_URL": "mysql://localhost/app_dev"},
+			wantSkip: true,
+		},
+		{
+			name:     "a URL naming no database has nothing to repoint",
+			vars:     map[string]string{"DATABASE_URL": "postgres://localhost"},
+			wantSkip: true,
+		},
+		{
+			name:     "an unparseable URL is a skip, never a silent pass",
+			vars:     map[string]string{"DATABASE_URL": "://nope"},
+			wantSkip: true,
+		},
+		{
+			name:    "both keys agreeing",
+			vars:    map[string]string{"DATABASE_URL": "postgres://localhost/app_dev", "POSTGRES_DB": "app_dev"},
+			wantURL: "postgres://localhost/app_wt_x",
+			wantDB:  "app_wt_x",
+		},
+		{
+			// Main contradicting itself: both move to the clone, DATABASE_URL's
+			// reading wins, and the human hears about it.
+			name:     "both keys disagreeing",
+			vars:     map[string]string{"DATABASE_URL": "postgres://localhost/app_dev", "POSTGRES_DB": "something_else"},
+			wantURL:  "postgres://localhost/app_wt_x",
+			wantDB:   "app_wt_x",
+			wantWarn: true,
+		},
+		{
+			name:   "POSTGRES_DB alone",
+			vars:   map[string]string{"POSTGRES_DB": "app_dev"},
+			wantDB: "app_wt_x",
+		},
+		{
+			name: "neither key: nothing to do",
+			vars: map[string]string{"PORT": "3000"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := Worktree{Root: "/main", EnvFiles: []envfile.File{{Path: "/main/.env", Vars: c.vars}}}
+			in := DeriveInput{App: "app", Slug: "x", DBName: "app_wt_x"}
+
+			var got Repair
+			for _, r := range (Doctor{}).PlanDerive(Worktree{Root: "/wt"}, source, in) {
+				if r.EnvPath == "/wt/.env" {
+					got = r
+				}
+			}
+			if got.Add["DATABASE_URL"] != c.wantURL {
+				t.Errorf("DATABASE_URL = %q, want %q", got.Add["DATABASE_URL"], c.wantURL)
+			}
+			if got.Add["POSTGRES_DB"] != c.wantDB {
+				t.Errorf("POSTGRES_DB = %q, want %q", got.Add["POSTGRES_DB"], c.wantDB)
+			}
+			if (got.Skip != "") != c.wantSkip {
+				t.Errorf("Skip = %q, want a skip: %v", got.Skip, c.wantSkip)
+			}
+			if (got.Warn != "") != c.wantWarn {
+				t.Errorf("Warn = %q, want a warn: %v", got.Warn, c.wantWarn)
+			}
+			// A skipped URL must not drag POSTGRES_DB along on its own: half a
+			// repoint leaves the app on the shared database while doctor reads green.
+			if c.wantSkip && len(got.Add) != 0 {
+				t.Errorf("a skipped repoint wrote keys anyway: %v", got.Add)
+			}
+		})
+	}
+}
+
+// TestPlanDeriveNoDBNameNoKeys: no clone was made, so nothing may claim one.
+// This is the ordering that keeps a .env from naming a database that isn't there.
+func TestPlanDeriveNoDBNameNoKeys(t *testing.T) {
+	source := Worktree{Root: "/main", EnvFiles: []envfile.File{
+		{Path: "/main/.env", Vars: map[string]string{"DATABASE_URL": "postgres://localhost/app_dev", "POSTGRES_DB": "app_dev"}},
+	}}
+	for _, r := range (Doctor{}).PlanDerive(Worktree{Root: "/wt"}, source, DeriveInput{App: "app", Slug: "x"}) {
+		for _, key := range []string{"DATABASE_URL", "POSTGRES_DB"} {
+			if _, ok := r.Add[key]; ok {
+				t.Errorf("%s: wrote %s with no clone to point it at", r.EnvPath, key)
+			}
+		}
+	}
+}
+
+// TestPlanDeriveDBPerService: a monorepo's services each get the repoint, and a
+// service main declares no database for is left alone.
+func TestPlanDeriveDBPerService(t *testing.T) {
+	source := Worktree{Root: "/main", EnvFiles: []envfile.File{
+		{Path: "/main/.env", Vars: map[string]string{"DATABASE_URL": "postgres://localhost/app_dev"}},
+		{Path: "/main/svc_a/.env", Vars: map[string]string{"POSTGRES_DB": "app_dev"}},
+		{Path: "/main/svc_b/.env", Vars: map[string]string{"PORT": "4000"}},
+	}}
+	got := map[string]map[string]string{}
+	for _, r := range (Doctor{}).PlanDerive(Worktree{Root: "/wt"}, source, DeriveInput{App: "app", Slug: "x", DBName: "app_wt_x"}) {
+		got[r.EnvPath] = r.Add
+	}
+	if got["/wt/.env"]["DATABASE_URL"] != "postgres://localhost/app_wt_x" {
+		t.Errorf("root: DATABASE_URL = %q", got["/wt/.env"]["DATABASE_URL"])
+	}
+	if got["/wt/svc_a/.env"]["POSTGRES_DB"] != "app_wt_x" {
+		t.Errorf("svc_a: POSTGRES_DB = %q", got["/wt/svc_a/.env"]["POSTGRES_DB"])
+	}
+	if _, ok := got["/wt/svc_b/.env"]["POSTGRES_DB"]; ok {
+		t.Errorf("svc_b declares no database but got one: %v", got["/wt/svc_b/.env"])
+	}
+}
+
+// TestPlanDeriveDBKeepsPorts: the port skip and the database repoint both land
+// on the root .env. Neither reason may erase the other.
+func TestPlanDeriveDBKeepsPorts(t *testing.T) {
+	crowded := map[string]string{}
+	for n := 1; n <= portSpread; n++ {
+		crowded["S"+strconv.Itoa(n)+"_PORT"] = strconv.Itoa(3000 + n)
+	}
+	source := Worktree{Root: "/main", EnvFiles: []envfile.File{
+		{Path: "/main/.env", Vars: map[string]string{"PORT": "3000", "DATABASE_URL": "mysql://localhost/app"}},
+	}}
+	fleet := []Worktree{{Root: "/wt2", EnvFiles: []envfile.File{{Path: "/wt2/.env", Vars: crowded}}}}
+
+	repairs := Doctor{}.PlanDerive(Worktree{Root: "/wt"}, source, DeriveInput{App: "app", Slug: "x", Fleet: fleet, DBName: "app_wt_x"})
+	if len(repairs) != 1 {
+		t.Fatalf("want one repair, got %+v", repairs)
+	}
+	if !strings.Contains(repairs[0].Skip, "port offset") || !strings.Contains(repairs[0].Skip, "DATABASE_URL") {
+		t.Errorf("one reason erased the other: %q", repairs[0].Skip)
+	}
+}
+
 func atoiT(t *testing.T, s string) int {
 	t.Helper()
 	n, err := strconv.Atoi(s)

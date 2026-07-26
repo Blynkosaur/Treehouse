@@ -2,6 +2,7 @@ package check
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -36,6 +37,23 @@ func DBName(base, slug string) string {
 	// Trimming keeps "app_" from deriving app__wt_x. Legality survives it: a
 	// prefix of an identifier is an identifier, and "" leaves a leading _.
 	return strings.TrimRight(base, "_") + "_wt_" + slug
+}
+
+// DBFromURL reads the database name out of a Postgres connection URL, and
+// reports whether the URL was one at all.
+//
+// net/url, never a regex: a connstring carries ?sslmode=require after the
+// database, an @ inside the password before the host, and a :5433 that a
+// hand-rolled pattern reads as part of the name. Anything that isn't a postgres
+// URL naming a database comes back false — cmd resolves the template with this
+// and PlanDerive rewrites with it, so one definition keeps the two from
+// disagreeing about what "the database in that URL" means.
+func DBFromURL(raw string) (string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || len(u.Path) < 2 {
+		return "", false
+	}
+	return u.Path[1:], true
 }
 
 // DBInput is everything PlanDB can't work out for itself — the same bargain
