@@ -36,17 +36,17 @@ Documented worktree pains (research + Bryan's own usage history) and the story t
 
 ## Build status — 2026-07-26
 
-Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`. (`th` is an alias for the `treehouse` binary.)
+Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`, `gc`, `seed`. (`th` is an alias for the `treehouse` binary.)
 
 | Status | Stories |
 | --- | --- |
-| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it), **L1** (`new`), **L2** (`ls`), **L3** (`rm`, minus the db/compose teardown that needs Epic A) |
-| 🟡 **Partial** | **C2** (doctor: env drift, `--ls`, `--json`, `--quiet`, exit codes 0/1/2, curated `[env] required` — no services/db/seed/stale checks, no fix lines), **C5** (`init` scaffold — no `.env.example`/compose scan) |
-| ⬜ **Not started** | **L4** (`cd`), **A3–A6** (migration state, re-seed, gc, redis), **B1–B3** (triage/why), **C3** (snapshot), **C4** (SessionStart hook), **T1** (TUI) |
+| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **L1** (`new`), **L2** (`ls`), **L3** (`rm`, teardown included) |
+| 🟡 **Partial** | **C2** (doctor: env drift, db/migration/seed checks, `--ls`, `--json` schema 2, `--quiet`, exit codes 0/1/2, curated `[env] required` — no dead-service or stale-base checks), **A3** (migration state, with `diverged` cut from the AC — see below), **C5** (`init` scaffold — no `.env.example`/compose scan) |
+| ⬜ **Not started** | **L4** (`cd`), **A6** (redis), **B1–B3** (triage/why), **C3** (snapshot), **C4** (SessionStart hook), **T1** (TUI) |
 
-Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktrees`/`Ref` (one porcelain parser), `EnvVarsByDir`, `Slug` (collision-safe branch → identifier), `Status` (one worktree, no I/O — the row a TUI renders), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`), and `treehouse.toml` config parsing.
+Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktrees`/`Ref` (one porcelain parser), `EnvVarsByDir`, `Slug` (collision-safe branch → identifier), `Status` (one worktree, no I/O — the row a TUI renders), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`/`DBPlan`/`DBDrop`), `Check` (the non-env verdict beside `Finding`), and `treehouse.toml` config parsing with one generic name-keyed `Merge`.
 
-**Pain coverage so far:** pain 1 (missing `.env`) via C1/hydrate; pains 2 & 9 (deps reinstall + disk) via E1; pain 4 (port fights) via E3; pain 5 (compose collisions) via E2; pain 6 (stale base) via L1's fetch-then-cut; pain 7 (worktree confusion) via L2; pain 8 (cruft) partly via L3. Pains 3, 10–13 still open.
+**Pain coverage so far:** pain 1 (missing `.env`) via C1/hydrate; pains 2 & 9 (deps reinstall + disk) via E1; **pain 3 (shared database, colliding migrations) via A1/A2/A3/A4**; pain 4 (port fights) via E3; pain 5 (compose collisions) via E2; pain 6 (stale base) via L1's fetch-then-cut; pain 7 (worktree confusion) via L2; **pain 8 (cruft) via L3 + A5**. Pains 10–13 still open.
 
 ---
 
@@ -65,7 +65,7 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 **L3. `treehouse rm <branch>` — remove without corpses.** As a Dev, removing a worktree also drops its db clone and its compose project, so nothing accumulates.
 
 - AC: refuses when dirty/unpushed unless `--force`; ~~`treehouse rm --merged` sweeps every worktree whose branch is merged~~.
-- ✅ **Done (2026-07-26)**, minus the corpses Epic A will create. `th rm <branch>` refuses dirty or not-on-any-remote work without `--force`, and **flatly refuses the worktree you're standing in** even with it. Db clone and compose teardown land with A1/A5.
+- ✅ **Done (2026-07-26)**. `th rm <branch>` refuses dirty or not-on-any-remote work without `--force`, and **flatly refuses the worktree you're standing in** even with it. It now drops that worktree's database clone through A5's own plan — same ownership rule (a provenance comment naming this repo), same refusal when connections are live, silent when there is no clone. Only the removed branch's clone: `th rm feat/a` deleting feat/b's database would be a surprise. Compose teardown is still open (a stopped project costs nothing but disk, unlike a database).
 - **Cut: `--merged`.** `git branch --merged` cannot see a squash-merged branch, so the sweep would silently skip exactly the branches most teams produce. A cleanup you can't trust is worse than none; `th rm` stays explicit.
 
 **L4. Shell niceties ➕.** `treehouse cd <branch>` jump with completion, like wtp.
@@ -83,17 +83,23 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 **A2. Env points at my clone automatically. 🧱** The worktree's `.env` is rewritten (`POSTGRES_DB`/`DATABASE_URL`) to the clone — _after_ canonical repair, so we never point a broken env at a fresh db.
 
 - AC: `doctor` fails loudly if `per_worktree = true` but `.env` targets the shared db.
-- ✅ **Done (2026-07-26)**, minus the doctor check. A fourth derived value beside E2/E3: `DATABASE_URL` is rewritten through `net/url` (a regex loses to `?sslmode=require`, to an `@` in the password, and to a non-default port), `POSTGRES_DB` alongside it. Both keys move together or neither does — half a repoint leaves the app on the shared db while doctor reads green. Set only after the clone is confirmed to exist.
+- ✅ **Done (2026-07-26)**, doctor check included. `doctor` **fails (exit 2)** when a clone exists and this worktree's `.env` still names the shared database — the state a half-applied hydrate leaves, which looks perfectly healthy from inside the app right up until the migration lands on every other worktree at once. Main is exempt: it IS the template. (The AC's `per_worktree = true` gate was dropped — there is no such config key and no need for one; the condition is simply "a clone exists for this worktree".) A fourth derived value beside E2/E3: `DATABASE_URL` is rewritten through `net/url` (a regex loses to `?sslmode=require`, to an `@` in the password, and to a non-default port), `POSTGRES_DB` alongside it. Both keys move together or neither does — half a repoint leaves the app on the shared db while doctor reads green. Set only after the clone is confirmed to exist.
 
-**A3. Migration-state awareness. 🎯** `doctor` says "db exists but 2 migrations behind this branch" (or "ahead of main — expected"), with the fix command.
+**A3. Migration-state awareness. 🎯** `doctor --db` says whether migrations are pending, and which side moved.
 
-- AC: configurable `migration_status` cmd (alembic/django/prisma-agnostic); verdicts: behind / ahead / diverged.
+- AC: configurable `[migrations] status` cmd (alembic/django/prisma-agnostic); verdicts: behind / ahead / ~~diverged~~.
+- 🟡 **Partial (2026-07-26) — `diverged` is CUT from the AC, and `ahead` is reported honestly rather than claimed.** A single generic status command cannot yield behind/ahead/diverged: `alembic current` prints a revision hash (deciding "ahead" needs the migration DAG), Django's `showmigrations` prints `[X]`/`[ ]` and cannot express "ahead" at all, `prisma migrate status` prints prose. Parsing three formats to synthesise a verdict none of them reports would be a confident lie. The genuinely shared signal is the **exit code** — all three exit non-zero when migrations are pending — so v1 combines it with a second source we CAN read honestly: `git diff --name-only <mainBranch>...HEAD -- <migrationsDir>`. Pending + this branch adds files → "your branch adds N migrations that haven't run" (the honest version of "ahead — expected"); pending + no new files → "main moved ahead". Exit 126/127 is a config typo, never a pending migration. The dir is inferred from `migrations/`, `alembic/versions/`, `prisma/migrations/`, `db/migrate/` at the worktree root; `[migrations] dir` sharpens it.
+- **Never runs from `th ls`.** A status command is seconds of somebody else's tooling per worktree; the fleet table exists to be glanced at. Opt in with `th doctor --db`.
 
 **A4. Named re-seed per worktree. 🎯** Re-seed _my_ clone with a named dataset ("ramp", "sondermind") without remembering the incantation; `doctor` shows which datasets are present.
 
-- AC: seed steps run against the worktree's db; a check query reports loaded datasets by name.
+- AC: seed steps run against the worktree's db; ~~a check query reports loaded datasets by name~~ → **a marker table treehouse writes itself**.
+- ✅ **Done (2026-07-26).** `th seed <name>` runs the `[[seed]]` command against this worktree's clone; `th doctor --db` reports which datasets are present.
+- **Cut: the per-seed `check` config key.** It assumed projects track their own seed state; almost none do, so the key would have been unfillable for nearly everybody — and a config key most people can't fill is a feature most people don't get. Instead treehouse writes `treehouse_seed(name, applied_at)` into the worktree's **own** database. That choice pays three ways: it rides the `TEMPLATE` copy, so a clone correctly inherits main's datasets; it is dropped with the database; and there is **no state file to garbage-collect** — the same principle the port registry follows. `th seed` refuses to run against the shared database, because seeding it through a half-applied hydrate is not recoverable by re-running anything.
 
 **A5. Clone garbage collection.** `treehouse gc` lists db clones whose worktrees are gone and drops them after confirmation. (L3 prevents; gc cures.)
+
+- ✅ **Done (2026-07-26).** **Ownership is by provenance comment, never by name prefix** — a prefix can match somebody's real database, and `Slug` is one-way, so a name can't be reversed to the branch a human needs to see before approving a drop. Anything without a `treehouse:<mainWorktreePath>:<branch>` comment naming THIS repo is not a candidate, full stop. Liveness is checked two ways and either one spares a database: the branch (the honest test) and the derived name (the belt, so renaming the shared database can't turn the whole live fleet into candidates). The template is name-checked as well. A database with **open connections is reported and kept** — dropping out from under a running process creates exactly the corpse gc exists to remove. List-then-confirm by default, `-y` for scripts, `--json` in the same envelope. `check.PlanGC` is the pure decision; `cmd/gc.go` does the psql and the prompt.
 
 **A6. Redis isolation ➕ (stretch).** Each worktree gets its own Redis logical db (`redis://localhost:6379/<n>`), so one worktree's cache flush doesn't nuke another's session.
 
@@ -118,7 +124,9 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 ## Epic C — Core doctor/hydrator 🟡 (partial — status corrected 2026-07-20 to match code)
 
 **C1.** `hydrate` fills `.env` from canonical without overwriting local values. ✅ **Done** — append-only writes from the main worktree; no backup needed since it never overwrites (present-but-empty keys deferred to v2).
-**C2.** `doctor` reports missing/empty required keys, dead services, unseeded data, stale base — each with a fix line; `--json`, `--quiet`, exit codes. 🟡 **Partial** — env-key drift, `--ls` table, main-worktree fallback, `--json` (an object envelope: `schema`/`root`/`status`/`findings`), `--quiet`, and exit codes 0/1/2 shipped, with `[env] required` in `treehouse.toml` as the only thing that fires the FAIL tier. Still missing: dead-service/unseeded/stale-base checks and fix lines.
+**C2.** `doctor` reports missing/empty required keys, dead services, unseeded data, stale base — each with a fix line; `--json`, `--quiet`, exit codes. 🟡 **Partial** — env-key drift, the database check, `--db` migration and seed checks, `--ls` table, main-worktree fallback, `--json` (an object envelope: `schema`/`root`/`status`/`findings`/`checks`, **schema 2**), `--quiet`, and exit codes 0/1/2 shipped. Two things now fire the FAIL tier: `[env] required` and a worktree whose `.env` targets the shared database while its clone exists. Still missing: dead-service and stale-base checks.
+
+  **Why `Check` is a sibling of `Finding`, not a wider `Finding`:** a `Finding` is shaped around env keys (`Missing`/`Empty`/`NoEnv`/`Keys`). Database, migration and seed results share none of that shape, and widening the struct would give every env row a pile of nil db fields to carry and every consumer a pile to skip. So the envelope carries two flat lists — `{schema: 2, root, status, findings: […], checks: […]}` — each with its own shape. The version bumped because that is what the field is for: a consumer reading `findings` for the whole story is wrong now, and should be told at the envelope rather than by silently missing the database row.
 **C3.** `snapshot` captures the current working `.env` as canonical. ⬜ **Not started** — no `snapshot` command exists.
 **C4.** `SessionStart` hook: agent starts with env state in context. ⬜ **Not started** — no treehouse hook exists.
 **C5.** `init` scans `.env.example` + docker-compose and generates `treehouse.toml`. 🟡 **Partial** — `init` writes a commented `treehouse.toml` scaffold; it does **not** yet scan `.env.example`/docker-compose to pre-populate rules.
@@ -152,7 +160,22 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 
 **Zero-config mode is the default.** With no `treehouse.toml`, doctor still works end to end: required env keys inferred from `.env.example` (reported as WARN, not FAIL — inferred requirements get softer teeth), services inferred from docker-compose, git staleness needs nothing. Useful in any repo ten seconds after install.
 
-**`treehouse.toml` is a sharpener, not a gatekeeper.** It upgrades inferred warnings to curated failures (the human-judged required list) and carries the un-inferable: data/seed checks, fix commands, hydrate steps, migration commands. `init` bridges the two — generates the config from the inferences as a starting point.
+**`treehouse.toml` is a sharpener, not a gatekeeper.** It upgrades inferred warnings to curated failures (the human-judged required list) and carries the un-inferable: seed commands, migration commands, a Docker psql prefix. `init` bridges the two — generates the config from the inferences as a starting point.
+
+**Zero-config covers A1 and A2 completely** (2026-07-26). The template name, the connection and the clone name all fall out of main's own `.env`, so a repo with no `treehouse.toml` still gets a database per worktree with its `.env` pointed at it. The whole additive schema is three keys, each genuinely non-inferable:
+
+```toml
+[database]
+psql = "docker compose exec -T db psql"   # ONLY when Postgres isn't a local psql
+[migrations]
+status = "alembic current"                # exit code = "migrations pending"
+dir    = "db/migrate"                     # only when the glob guesses wrong
+[[seed]]
+name = "ramp"
+command = "python manage.py loaddata ramp"
+```
+
+There is deliberately **no `[database] template`**: which database to clone is main's `.env`, and a second place to say it is a second place for it to be wrong.
 
 Build-order consequence: env checker v1 reads `.env.example` directly; the config package moves later (arrives with data checks).
 

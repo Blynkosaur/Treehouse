@@ -68,6 +68,7 @@ rewrite, so it writes to a temp file and renames — `Append` can only damage th
 | 7 | No trailing newline and CRLF both survive; output always ends in `\n` | `TestSet/no_trailing_newline`, `TestSet/CRLF_line_endings_survive` |
 | 8 | A second identical call produces a byte-identical file | asserted in every `TestSet` case |
 | 9 | Values containing whitespace, `#` or quotes are quoted so `Parse` round-trips | `TestSet/value_needing_quotes_is_quoted` |
+| 10 | `Set`, `Append` and `Create` write the **same bytes** for the same pair — hydrate appends a key that derive later `Set`s, and a password with a `#` must not depend on which phase wrote it | `TestWritersAgreeOnBytes` |
 
 ## `envfile.LoadPath(path)` — `internal/envfile/envfile.go`
 
@@ -93,6 +94,48 @@ of ports (E3). Pure — cmd gathers the fleet and passes it in.
 | 9 | Derived repairs are `Overwrite` (rewrite existing lines), not append | `TestPlanDeriveCompose` |
 | 10 | End to end: `th new` derives into a `.env` phase 1 only just created | `TestNew/born_ready` |
 
+## `PlanGC` — `internal/check/db.go`
+
+Picks the database clones whose worktrees are gone. Pure; `cmd/gc.go` does the
+psql calls and the confirmation.
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | A database with **no** treehouse provenance comment is never a candidate — a name prefix can match somebody's real database | `TestPlanGC/no_provenance_comment_at_all_—_never_a_candidate` |
+| 2 | A clone commented for another repo is out of scope | `TestPlanGC/another_repo's_clone_is_out_of_scope` |
+| 3 | A clone whose branch is still checked out is spared | `TestPlanGC/a_clone_whose_worktree_is_still_checked_out` |
+| 4 | Renaming the shared database cannot turn the live fleet into candidates (branch spares them even when the derived name no longer matches) | `TestPlanGC/the_template_was_renamed_since_the_clones_were_cut` |
+| 5 | The template is name-checked and spared even if it carries our comment | `TestPlanGC/the_template_is_spared…` |
+| 6 | Each drop carries the ORIGINAL branch and the size — `Slug` is one-way, so the comment is the only way back to a name a human can approve | `TestPlanGCCarriesTheBranch` |
+| 7 | `Provenance`/`ParseProvenance` round-trip, including a `:` in the path; everything else is rejected | `TestProvenanceRoundTrip`, `TestParseProvenanceRejects` |
+| 8 | Live: `Drop` of a database in use returns `ErrBusy` — gc reports the sessions rather than killing them | `TestDropRefusesTheBusy` |
+
+## `CheckDB` — `internal/check/checks.go`
+
+A2's acceptance criterion: doctor must be loud when a clone exists and `.env`
+still names the shared database.
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | Clone exists + `.env` names the shared database → **fail** (exit 2) | `TestCheckDB/clone_exists_but_.env_still_names_the_shared_database` |
+| 2 | Clone exists + `.env` names it → ok | `TestCheckDB/pointed_at_its_own_clone` |
+| 3 | No clone yet → warn with a fix line | `TestCheckDB/no_clone_yet` |
+| 4 | The main checkout is not a worktree missing a clone → ok | `TestCheckDB/the_main_checkout…` |
+| 5 | `PlanDB` declined (detached HEAD, no database in the repo) → `skip`, never a silent gap | `TestCheckDB/the_planner_declined,_and_says_why` |
+| 6 | A failing check fails the whole verdict; `skip` never moves it | `TestVerdict` |
+| 7 | `ls`'s DB column is clone-exists/missing only, blank when Postgres was never asked, `shared` for main | `TestStatusDBColumn` |
+
+## `CheckMigrations` / `CheckSeed` — `internal/check/data.go`
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | No `[migrations] status` → `skip` with the config line to add, never a guess | `TestCheckMigrations/unconfigured…` |
+| 2 | Exit 126/127 (typo, missing tool) is reported as unrunnable, **not** as pending | `TestCheckMigrations/a_command_that_could_not_run…` |
+| 3 | Pending + this branch adds files → "your branch adds N" (the honest "ahead") | `TestCheckMigrations/pending_with_new_files…` |
+| 4 | Pending + no new files → "main moved ahead" | `TestCheckMigrations/pending_with_no_new_files…` |
+| 5 | Migrations dir inferred from the four conventions; `[migrations] dir` always wins | `TestMigrationsDir` |
+| 6 | Seed datasets reported from the marker table in the worktree's own database | `TestCheckSeed`, `TestCloneRoundTrip` (live) |
+
 ## `make` command — `cmd/make.go`
 
 Generates `.env.example` from each service's `.env`, keys copied, values blanked.
@@ -113,3 +156,15 @@ sync new keys into an existing `.env.example` (v2 `--sync`); E3 governs
 rewritten; port detection is by key name (`PORT`, `*_PORT`), so `SERVER_ADDR=:3000`
 is invisible; "free" means *not declared in a sibling `.env`*, not *unbound on the
 host* — a live probe would be racy, and determinism is what E3 exists for.
+
+Newer ones, same spirit: migration state is the status command's **exit code**
+plus a git diff, never a parse of alembic/Django/Prisma output (see A3 in
+user-stories.md); the migrations dir is probed at the worktree root only, so a
+monorepo sets `[migrations] dir`; `th seed` records datasets in a marker table
+inside the worktree's own database, so a dataset loaded by hand outside
+treehouse is invisible to doctor; `[database] psql` is split on whitespace, so a
+prefix argument containing a space cannot be expressed.
+
+CR-only (classic-Mac) line endings are **deliberately** not handled: `Parse`
+can't read that format either, so the two sides are self-consistent, and
+"fixing" one recreates a `Set`/`Parse` divergence a previous tester hunted down.
