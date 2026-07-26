@@ -71,6 +71,18 @@ const treehouseTOML = `# treehouse.toml — shared, committed project config (li
 # [[seed]]
 # name = "ramp"
 # command = "python manage.py loaddata ramp"
+
+# Failure signatures for "th triage". The built-ins cover connection refused,
+# a missing relation, and an unset env var; add the ones only your stack says.
+# "needs" names the doctor fact that must AGREE before triage blames the
+# environment — env | db | migration | service. Reusing a built-in's name
+# replaces it.
+# [[signature]]
+# name = "kafka-down"
+# match = "NoBrokersAvailable"
+# cause = "kafka is not reachable"
+# fix = "docker compose up -d kafka"
+# needs = "service"
 `
 
 // runInit writes treehouseTOML to the current directory, refusing to overwrite

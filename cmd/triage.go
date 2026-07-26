@@ -262,15 +262,20 @@ func signatureName(s check.Signature) string { return s.Name }
 // hookRoot is the worktree the hook is talking about. Claude Code hands us the
 // tool call's own cwd, which is more reliable than whatever directory the hook
 // subprocess happened to inherit.
+// A cwd that isn't a repo is still a directory worth scanning; a cwd that isn't
+// there at all (a stale payload, a hand-written one) falls back to ours rather
+// than failing — a hook that dies on a bad field tells nobody anything.
 func hookRoot(cwd string) (string, error) {
 	if cwd == "" {
 		return worktreeRoot()
 	}
-	out, err := gitOut(cwd, "rev-parse", "--show-toplevel")
-	if err != nil {
+	if out, err := gitOut(cwd, "rev-parse", "--show-toplevel"); err == nil {
+		return strings.TrimSpace(out), nil
+	}
+	if info, err := os.Stat(cwd); err == nil && info.IsDir() {
 		return cwd, nil
 	}
-	return strings.TrimSpace(out), nil
+	return worktreeRoot()
 }
 
 // triageLines renders a verdict for whoever has to act on it: the cause first,
