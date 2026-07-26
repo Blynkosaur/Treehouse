@@ -4,6 +4,7 @@ package check
 import (
 	"errors"
 	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -74,6 +75,15 @@ func Discover(root string) (Worktree, error) {
 				// subtree — this one line is the node_modules immunity.
 				return fs.SkipDir
 			}
+			if path != root && isRepo(path) {
+				// Another checkout's files are not this worktree's services. A
+				// worktree nested under main is a real layout (this repo keeps its
+				// own under .claude/worktrees/), and without this main's env map
+				// grows a "service" per nested worktree — which hydrate then
+				// materialises in EVERY other worktree, writing main's secrets into
+				// invented directories.
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if composeFileNames[d.Name()] {
@@ -101,6 +111,15 @@ func Discover(root string) (Worktree, error) {
 		return Worktree{}, walkErr
 	}
 	return wt, nil
+}
+
+// isRepo reports whether dir is the root of some other checkout. A worktree and
+// a submodule carry a .git FILE, a plain clone a .git directory — one Lstat
+// covers all three, and it is the only cheap question that separates "our
+// subdirectory" from "somebody else's repository".
+func isRepo(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, ".git"))
+	return err == nil
 }
 
 // EnvVarsByDir indexes this worktree's real .env files by directory relative to

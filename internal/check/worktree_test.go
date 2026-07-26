@@ -60,6 +60,46 @@ func TestDiscover(t *testing.T) {
 	}
 }
 
+// TestDiscoverSkipsNestedCheckouts: a worktree may live INSIDE the main
+// checkout — this repo keeps its own under .claude/worktrees/ — and a submodule
+// always does. Walking into one makes every nested checkout look like a service
+// of main's, and hydrate then materialises that phantom service in every OTHER
+// worktree: main's real secrets written into a directory nobody asked for.
+func TestDiscoverSkipsNestedCheckouts(t *testing.T) {
+	root := t.TempDir()
+	for _, f := range []struct{ rel, content string }{
+		{".env", "A=1"},
+		{"svc/.env", "B=2"},                       // an ordinary subdirectory: collected
+		{"wt/feat/.git", "gitdir: /elsewhere"},    // a worktree's gitfile
+		{"wt/feat/.env", "SECRET=leaked"},         // not ours
+		{"sub/.git/HEAD", "ref: refs/heads/main"}, // a nested clone's .git DIR
+		{"sub/.env", "ALSO=leaked"},
+	} {
+		path := filepath.Join(root, f.rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(f.content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wt, err := Discover(root)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	var got []string
+	for _, f := range wt.EnvFiles {
+		got = append(got, f.Path)
+		if strings.Contains(f.Path, "wt/feat") || strings.Contains(f.Path, "sub/") {
+			t.Errorf("walked into another checkout: %s", f.Path)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("found %d env files, want 2 (root and svc):\n%s", len(got), strings.Join(got, "\n"))
+	}
+}
+
 func TestDiscoverMissingRoot(t *testing.T) {
 	_, err := Discover(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err == nil {

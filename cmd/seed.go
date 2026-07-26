@@ -68,7 +68,9 @@ func runSeed(cmd *cobra.Command, args []string) error {
 	switch template := check.EnvDB(source); {
 	case db == "":
 		return fmt.Errorf("this worktree's .env names no database — nothing to seed")
-	case db == template && !within(root, mainRoot):
+	// samePath, not within: a worktree nested under main is not main, and
+	// treating it as one lets `th seed` load a dataset into the SHARED database.
+	case db == template && !samePath(root, mainRoot):
 		return fmt.Errorf("this worktree's .env still targets the shared database %s — run `th hydrate` first", template)
 	}
 

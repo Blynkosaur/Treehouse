@@ -52,6 +52,14 @@ var testItems = []envVariableItem{
 		input: "exported=1\nexport=2",
 		want:  map[string]string{"exported": "1", "export": "2"},
 	},
+	{
+		// A nameless key broke the Set/Parse agreement in the direction that
+		// hurts: Parse reported "" as a key, checkVars refused to write it, and
+		// `th hydrate` aborted on the whole worktree over one stray line.
+		name:  "a line opening with = declares nothing",
+		input: "=stray\n  =also stray\nFOO=bar\n",
+		want:  map[string]string{"FOO": "bar"},
+	},
 }
 
 func TestParse(t *testing.T) {
@@ -345,6 +353,7 @@ func TestSetParseAgree(t *testing.T) {
 		"garbage line\nA=1\n",
 		"PORT=3000\nPORTAL=x\nADMIN_PORT=3001\n",
 		"A=b=c\nB=#notacomment\n",
+		"=novalue\nA=1\n", // a nameless key Parse must not report, or Set can't honour it
 	}
 	for _, content := range corpus {
 		before, err := Parse(content)

@@ -116,7 +116,10 @@ func dbChecks(d check.Doctor, root, mainRoot string, wt, source check.Worktree, 
 	state := check.DBState{
 		Plan:  d.PlanDB(check.DBInput{Template: template, Existing: names, Slug: branchSlug(refs, root)}),
 		EnvDB: check.EnvDB(wt),
-		Main:  within(root, mainRoot),
+		// samePath, not within: a worktree nested under the main checkout is not
+		// the main checkout, and calling it one makes CheckDB report the shared
+		// database as legitimate — silencing A2's whole fail tier.
+		Main: samePath(root, mainRoot),
 	}
 	checks := []check.Check{d.CheckDB(state)}
 	return append(checks, dataChecks(d, root, mainBranch(refs), wt, state.Plan, cfg)...)

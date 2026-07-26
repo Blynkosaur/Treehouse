@@ -69,6 +69,13 @@ func splitLine(line string) (key, val string, ok bool) {
 	if rest, cut := strings.CutPrefix(k, "export "); cut {
 		k = strings.TrimSpace(rest)
 	}
+	// A line that opens with "=" declares nothing. Reporting it as the key ""
+	// broke the Set/Parse agreement in the one direction that hurts: Parse handed
+	// hydrate a nameless key to fill, checkVars refused to write it, and the whole
+	// `th hydrate` aborted over one stray line in somebody's .env.
+	if k == "" {
+		return "", "", false
+	}
 	return k, unquote(strings.TrimSpace(v)), true
 }
 

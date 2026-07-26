@@ -444,6 +444,46 @@ func gitStdout(t *testing.T, dir string, args ...string) string {
 	return string(out)
 }
 
+// TestNestedWorktreeIsNotMain is the layout this repo itself uses — worktrees
+// under .claude/worktrees/ — and it was silently broken end to end. "am I main?"
+// asked whether root lived UNDER main, which a nested worktree does, so:
+// derive never ran (no compose namespace, no port offset) and, worst, the .env
+// was left naming the SHARED database while the clone existed beside it. That is
+// the exact half-applied state A2's fail tier exists to catch, and doctor called
+// it "the main checkout" instead.
+func TestNestedWorktreeIsNotMain(t *testing.T) {
+	main := gitignoredEnvRepo(t)
+	nested := filepath.Join(main, ".th", "feat")
+	git(t, main, "worktree", "add", nested, "-b", "feat")
+
+	out, _, code := runSplit(t, nested, "hydrate", "--skip-deps")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if strings.Contains(out, "main worktree") {
+		t.Fatalf("a worktree nested under main was treated as main:\n%s", out)
+	}
+
+	vars := parseEnv(readEnv(t, filepath.Join(nested, ".env")))
+	if vars["COMPOSE_PROJECT_NAME"] == "" {
+		t.Error("no compose namespace — its containers would clobber main's")
+	}
+	if vars["PORT"] == "3000" {
+		t.Error("PORT was never offset — it collides with main's")
+	}
+
+	// The other half: main's own view must not have grown a service for it.
+	// Hydrating a sibling would otherwise write main's secrets into
+	// <sibling>/.th/feat/.env, a directory nobody asked for.
+	if out, _, code := runSplit(t, main, "new", "other", "--skip-deps"); code != 0 {
+		t.Fatalf("new other: exit %d\n%s", code, out)
+	}
+	phantom := filepath.Join(filepath.Dir(main), "app-other", ".th")
+	if _, err := os.Stat(phantom); err == nil {
+		t.Errorf("main's env map included the nested worktree: %s was created", phantom)
+	}
+}
+
 // TestFleetPortsDisjoint drives the real thing: three siblings plus main, and
 // no worktree may share a port with any other. Main packs 3000/3001 one apart,
 // so offset 1 self-collides and the planner has to keep walking.

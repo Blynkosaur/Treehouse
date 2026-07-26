@@ -204,7 +204,13 @@ func hydrateDerive(root, sourceRoot string, source check.Worktree) error {
 	// its COMPOSE_PROJECT_NAME is the app name resolveApp reads back, so deriving
 	// here rewrites the source of truth: ports walk one offset further up on
 	// every run, and the project name grows another "_main" each time.
-	if within(root, sourceRoot) {
+	// samePath, not within: a worktree may legally live INSIDE the main checkout
+	// (this repo keeps its own under .claude/worktrees/). "under main" answered
+	// yes for those, so derive never ran — no compose namespace, no port offset,
+	// and the .env left pointed at the SHARED database, which is the one failure
+	// A2 exists to prevent. root is git's own toplevel for this worktree, so
+	// equality is the exact question.
+	if samePath(root, sourceRoot) {
 		sayln("• main worktree: nothing to derive (its values are the base)")
 		return nil
 	}
