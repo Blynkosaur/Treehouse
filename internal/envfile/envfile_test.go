@@ -115,6 +115,120 @@ func TestCreateRefusesOverwrite(t *testing.T) {
 	}
 }
 
+func TestSet(t *testing.T) {
+	cases := []struct {
+		name    string
+		initial string // written verbatim; absent means no file at all
+		absent  bool
+		vars    map[string]string
+		want    string
+	}{
+		{
+			name:    "overwrite preserves comments and key order",
+			initial: "# hand-written\nA=1\nPORT=3000\nB=2\n",
+			vars:    map[string]string{"PORT": "3001"},
+			want:    "# hand-written\nA=1\nPORT=3001\nB=2\n",
+		},
+		{
+			name:    "every duplicate is rewritten",
+			initial: "PORT=3000\nA=1\nPORT=9999\n",
+			vars:    map[string]string{"PORT": "3001"},
+			want:    "PORT=3001\nA=1\nPORT=3001\n",
+		},
+		{
+			name:    "commented-out key is not a match",
+			initial: "# PORT=1\n",
+			vars:    map[string]string{"PORT": "3001"},
+			want:    "# PORT=1\nPORT=3001\n",
+		},
+		{
+			name:    "export prefix is not a match (Parse reads it as 'export PORT')",
+			initial: "export PORT=3000\n",
+			vars:    map[string]string{"PORT": "3001"},
+			want:    "export PORT=3000\nPORT=3001\n",
+		},
+		{
+			name:    "no trailing newline",
+			initial: "A=1",
+			vars:    map[string]string{"B": "2"},
+			want:    "A=1\nB=2\n",
+		},
+		{
+			name:    "CRLF line endings survive",
+			initial: "A=1\r\nPORT=3000\r\n",
+			vars:    map[string]string{"PORT": "3001"},
+			want:    "A=1\r\nPORT=3001\r\n",
+		},
+		{
+			name:   "absent file is created",
+			absent: true,
+			vars:   map[string]string{"B": "2", "A": "1"},
+			want:   "A=1\nB=2\n",
+		},
+		{
+			name:    "value needing quotes is quoted",
+			initial: "A=1\n",
+			vars:    map[string]string{"A": "two words"},
+			want:    "A=\"two words\"\n",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), ".env")
+			if !c.absent {
+				if err := os.WriteFile(path, []byte(c.initial), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := Set(path, c.vars); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+			got := readFile(t, path)
+			if got != c.want {
+				t.Errorf("Set()\n  got:  %q\n  want: %q", got, c.want)
+			}
+			// Idempotence: a second identical call must not grow the file.
+			if err := Set(path, c.vars); err != nil {
+				t.Fatalf("second Set: %v", err)
+			}
+			if again := readFile(t, path); again != got {
+				t.Errorf("Set is not idempotent\n  first:  %q\n  second: %q", got, again)
+			}
+		})
+	}
+}
+
+func TestSetPreservesMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("A=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Set(path, map[string]string{"A": "2"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600 — a secret-bearing .env must not widen", info.Mode().Perm())
+	}
+}
+
+func TestLoadPathReportsParseError(t *testing.T) {
+	// A line past bufio.Scanner's 64KB cap makes Parse fail. LoadPath used to
+	// return the (nil) os error instead, handing callers an empty File and a
+	// nil error — silent data loss all the way up into Discover.
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("A="+strings.Repeat("x", 70000)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPath(path); err == nil {
+		t.Fatal("LoadPath swallowed a parse error")
+	}
+}
+
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
