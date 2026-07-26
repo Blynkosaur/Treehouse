@@ -43,6 +43,11 @@ func Slug(branch string) string {
 		s = strings.Trim(s[:40], "_")
 		lossy = true
 	}
+	if s == "" {
+		// An empty branch maps to an empty slug, which is not an identifier at
+		// all: COMPOSE_PROJECT_NAME=app_ and a worktree dir named "app-".
+		lossy = true
+	}
 	if !lossy {
 		return s
 	}
@@ -110,10 +115,10 @@ func (d Doctor) PlanDerive(w, source Worktree, in DeriveInput) []Repair {
 			}
 		} else {
 			// Never fail hydrate over a port: report and move on, same as DepPlan.
-			byPath[filepath.Join(w.Root, ".env")] = &Repair{
-				EnvPath: filepath.Join(w.Root, ".env"),
-				Skip:    "no free port offset — every one of the 200 collides with a sibling worktree",
-			}
+			// Annotate the root repair rather than replacing it — ports and the
+			// compose project are separate concerns, and a port skip must not
+			// take E2's namespacing down with it.
+			at(w.Root).Skip = "no free port offset — every one of the 200 collides with a sibling worktree"
 		}
 	}
 
