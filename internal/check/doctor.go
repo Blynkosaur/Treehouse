@@ -12,6 +12,12 @@ import (
 type Doctor struct {
 	Required   []string // keys whose absence is a FAIL, not a WARN
 	MainBranch string   // what Row measures "behind" against; empty = main is detached or bare
+
+	// Databases is every database in the cluster, asked once by cmd and handed
+	// down — nil means Postgres was never asked (no database in this repo) or
+	// wasn't reachable. A live fact passed in as plain data, the same bargain
+	// DBInput.Existing makes, so nothing here has to know how to reach Postgres.
+	Databases []string
 }
 
 // Finding is one directory's env-drift verdict — pure data, no presentation.

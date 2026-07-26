@@ -260,7 +260,7 @@ func hydrateDerive(root, sourceRoot string, source check.Worktree) error {
 // unreachable Postgres must not take that work down with it. The clone itself is
 // near-instant — Postgres copies the template at the file level.
 func hydrateDB(mainRoot, branch, slug string, source check.Worktree) string {
-	in := check.DBInput{Template: check.TemplateDB(source), Slug: slug}
+	in := check.DBInput{Template: check.EnvDB(source), Slug: slug}
 
 	// Postgres is asked exactly once, and only when the plan would otherwise act.
 	// Planning twice is free (PlanDerive's sibling is a pure function), and it

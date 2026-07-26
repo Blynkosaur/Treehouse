@@ -99,8 +99,8 @@ func TestDoctorJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &envelope); err != nil {
 		t.Fatalf("output is not clean JSON (%v):\n%s", err, out)
 	}
-	if envelope.Schema != 1 || envelope.Status != "fail" {
-		t.Errorf("envelope = %+v, want schema 1 / status fail", envelope)
+	if envelope.Schema != 2 || envelope.Status != "fail" {
+		t.Errorf("envelope = %+v, want schema 2 / status fail", envelope)
 	}
 	if len(envelope.Findings) != 1 || len(envelope.Findings[0].Failed) != 1 {
 		t.Errorf("findings = %+v, want one finding failing on KEY", envelope.Findings)
@@ -143,7 +143,7 @@ func TestLs(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}
-	for _, want := range []string{"app", "app-feat", "feat", "WORKTREE", "BRANCH", "ENV"} {
+	for _, want := range []string{"app", "app-feat", "feat", "WORKTREE", "BRANCH", "ENV", "DB"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table missing %q:\n%s", want, out)
 		}
@@ -165,8 +165,8 @@ func TestLs(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &envelope); err != nil {
 		t.Fatalf("ls --json is not clean JSON (%v):\n%s", err, raw)
 	}
-	if envelope.Schema != 1 || len(envelope.Worktrees) != 2 {
-		t.Fatalf("envelope = %+v, want schema 1 and 2 worktrees", envelope)
+	if envelope.Schema != 2 || len(envelope.Worktrees) != 2 {
+		t.Fatalf("envelope = %+v, want schema 2 and 2 worktrees", envelope)
 	}
 	current := 0
 	for _, w := range envelope.Worktrees {

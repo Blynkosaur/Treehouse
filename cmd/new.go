@@ -88,14 +88,14 @@ func runNew(cmd *cobra.Command, args []string) error {
 	}
 
 	sayln()
-	findings, err := diagnose(path)
+	findings, checks, err := diagnose(path)
 	if err != nil {
 		return err
 	}
 	if !quiet {
-		printReport(findings, path)
+		printReport(findings, checks, path)
 	}
-	return verdict(findings)
+	return verdict(findings, checks)
 }
 
 // newWorktreePath puts the worktree BESIDE the main checkout, never inside it.

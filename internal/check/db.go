@@ -57,13 +57,18 @@ func DBFromURL(raw string) (string, bool) {
 	return u.Path[1:], true
 }
 
-// TemplateDB is the shared database every clone is cut from: whatever main's
-// root .env points at. DATABASE_URL is the source of truth because it is what
-// an ORM actually dials; POSTGRES_DB is the compose-style fallback. Empty means
-// the repo declares no database — and then nothing is created at all, which is
-// what keeps `th new` in a non-Postgres repo from leaving orphans.
-func TemplateDB(source Worktree) string {
-	vars := source.EnvVarsByDir()["."]
+// EnvDB is the database a worktree's root .env actually points at.
+// DATABASE_URL is the source of truth because it is what an ORM dials;
+// POSTGRES_DB is the compose-style fallback.
+//
+// Asked of MAIN it answers the template every clone is cut from — and empty
+// means the repo declares no database at all, so nothing is created and psql is
+// never asked, which is what keeps `th new` in a non-Postgres repo from leaving
+// orphans. Asked of a worktree it answers what that checkout is talking to,
+// which is how doctor catches a half-applied hydrate. One function, because two
+// would eventually disagree about which key wins.
+func EnvDB(w Worktree) string {
+	vars := w.EnvVarsByDir()["."]
 	if db, ok := DBFromURL(vars["DATABASE_URL"]); ok {
 		return db
 	}

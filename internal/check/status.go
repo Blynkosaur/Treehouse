@@ -2,6 +2,7 @@ package check
 
 import (
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -10,12 +11,27 @@ import (
 // Deliberately per-worktree rather than a batch API: the TUI streams cells in
 // concurrently, and a batch call would make it wait for the slowest worktree.
 type Status struct {
-	Path    string `json:"path"`
-	Branch  string `json:"branch"`
-	Env     string `json:"env"`    // ok | warn | fail
-	Behind  int    `json:"behind"` // commits in main this branch doesn't have
-	Dirty   bool   `json:"dirty"`
-	Current bool   `json:"current"` // the worktree the human is standing in
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+	Env    string `json:"env"` // ok | warn | fail
+
+	// DB is clone-exists or clone-missing and NOTHING else:
+	// ok | missing | shared | "". Empty means the question wasn't asked — no
+	// database in this repo, or Postgres wasn't reachable — and "shared" is the
+	// main checkout, which is the template rather than a worktree with a clone.
+	// Whether .env is actually pointed at the clone is CheckDB's job, because
+	// answering it needs this worktree's env read, and the fleet view must stay
+	// one git round trip per row.
+	DB string `json:"db,omitempty"`
+
+	// Migrations is filled only by `th doctor --db`. Running a project's
+	// migration-status command is seconds of somebody else's tooling per
+	// worktree, and `th ls` is a glance — it must never pay that.
+	Migrations string `json:"migrations,omitempty"` // pending | applied | unknown | ""
+
+	Behind  int  `json:"behind"` // commits in main this branch doesn't have
+	Dirty   bool `json:"dirty"`
+	Current bool `json:"current"` // the worktree the human is standing in
 }
 
 // Status folds one worktree into one row. It asks git nothing and touches no
@@ -30,6 +46,23 @@ func (d Doctor) Status(w Worktree, ref Ref, source Worktree) Status {
 		Behind: ref.Behind,
 		Dirty:  ref.Dirty,
 	}
+	// One pg.Databases call serves the whole fleet — cmd makes it once and hands
+	// the names down. A per-worktree subprocess here would put a psql round trip
+	// behind every row of a table that exists to be glanced at.
+	if template := EnvDB(source); d.Databases != nil && template != "" && ref.Branch != "" {
+		switch {
+		case ref.Branch == d.MainBranch:
+			// Main is the template, not a worktree missing a clone. A branch can
+			// only be checked out in one worktree, so this identifies it exactly.
+			// Reporting it "missing" would train people to ignore the column.
+			s.DB = "shared"
+		case slices.Contains(d.Databases, DBName(template, Slug(ref.Branch))):
+			s.DB = "ok"
+		default:
+			s.DB = "missing"
+		}
+	}
+
 	if s.Branch == "" {
 		s.Branch = "(detached)"
 		if ref.Bare {

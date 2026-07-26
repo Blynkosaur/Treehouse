@@ -103,7 +103,7 @@ func planGC(fleet []check.Ref, mainRoot string) ([]check.DBDrop, error) {
 	return check.Doctor{}.PlanGC(check.GCInput{
 		Owned:    owned,
 		Fleet:    fleet,
-		Template: check.TemplateDB(source),
+		Template: check.EnvDB(source),
 		MainRoot: mainRoot,
 	}), nil
 }

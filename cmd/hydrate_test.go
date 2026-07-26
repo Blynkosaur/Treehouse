@@ -381,7 +381,7 @@ func TestJSONIsOnlyJSON(t *testing.T) {
 			if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
 				t.Fatalf("stdout is not clean JSON (%v):\n%s", err, stdout)
 			}
-			if envelope.Schema != 1 || envelope.Root == "" || envelope.Status == "" {
+			if envelope.Schema != 2 || envelope.Root == "" || envelope.Status == "" {
 				t.Errorf("envelope missing schema/root/status: %+v", envelope)
 			}
 		})

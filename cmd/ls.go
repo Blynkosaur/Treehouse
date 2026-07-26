@@ -9,6 +9,7 @@ import (
 
 	"github.com/Blynkosaur/treehouse/internal/check"
 	"github.com/Blynkosaur/treehouse/internal/config"
+	"github.com/Blynkosaur/treehouse/internal/pg"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/spf13/cobra"
@@ -47,6 +48,16 @@ func runLs(cmd *cobra.Command, args []string) error {
 	cfg, _ := config.Load(mainRoot)
 	d := check.Doctor{Required: cfg.Env.Required, MainBranch: refs[0].Branch}
 
+	// ONE psql round trip for the whole fleet, and only when main's .env names a
+	// database at all. The column answers clone-exists / clone-missing and
+	// nothing more: `ls` already pays a pair of git round trips and a tree walk
+	// per row, and a table people run to glance at cannot also run somebody's
+	// migration tooling. Unreachable Postgres leaves the column blank rather than
+	// failing the command.
+	if check.EnvDB(source) != "" {
+		d.Databases, _ = pg.Databases()
+	}
+
 	// Every row is an independent pair of git round trips plus a tree walk, and
 	// they share nothing — so they run at once. Each goroutine owns exactly one
 	// preallocated slot, which is what buys concurrency with no mutex and no
@@ -69,7 +80,7 @@ func runLs(cmd *cobra.Command, args []string) error {
 			Root      string         `json:"root"`
 			Status    string         `json:"status"`
 			Worktrees []check.Status `json:"worktrees"`
-		}{1, mainRoot, worstEnv(rows), rows})
+		}{2, mainRoot, worstEnv(rows), rows})
 	}
 	printFleet(rows)
 	return nil
@@ -98,7 +109,7 @@ func printFleet(rows []check.Status) {
 			}
 			return lipgloss.NewStyle().Padding(0, 1)
 		}).
-		Headers("WORKTREE", "BRANCH", "ENV", "BEHIND", "DIRTY")
+		Headers("WORKTREE", "BRANCH", "ENV", "DB", "BEHIND", "DIRTY")
 
 	for _, r := range rows {
 		name := filepath.Base(r.Path)
@@ -113,9 +124,25 @@ func printFleet(rows []check.Status) {
 		if r.Dirty {
 			dirty = emptyStyle.Render("yes")
 		}
-		t.Row(name, r.Branch, envCell(r.Env), behind, dirty)
+		t.Row(name, r.Branch, envCell(r.Env), dbCell(r.DB), behind, dirty)
 	}
 	fmt.Println(t)
+}
+
+// dbCell renders the clone column. Blank means the question wasn't asked — no
+// database in this repo, or Postgres wasn't up — which is not the same as
+// "missing" and must not be coloured like it.
+func dbCell(db string) string {
+	switch db {
+	case "ok":
+		return okStyle.Render("ok")
+	case "missing":
+		return missingStyle.Render("missing")
+	case "shared":
+		return okStyle.Render("shared")
+	default:
+		return "—"
+	}
 }
 
 func envCell(env string) string {
