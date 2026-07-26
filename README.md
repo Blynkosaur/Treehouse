@@ -132,6 +132,18 @@ clones whose worktree is gone:
 drop 1 database(s)? [y/N]
 ```
 
+**Your database name has to be a bare identifier.** Every name treehouse
+interpolates into SQL is checked against `^[a-z_][a-z0-9_]*$` and refused
+otherwise — treehouse refuses rather than escapes, because escaping is where
+injection bugs live. The cost is that legal-but-quoted names like `app-db` or
+`APPDB` are refused too: such a repo gets **no clones at all**, permanently, with
+one skip line saying so. Rename the database or stay on the shared one.
+
+**`th ls` only reports whether the clone exists.** A worktree whose clone exists
+but whose `.env` still names the *shared* database shows `db: ok` in the fleet
+table, while `th doctor` calls that same state a failure and exits 2. Trust
+`doctor` over the glance view until this is reconciled.
+
 ## Migrations and seeds
 
 Both are opt-in (`th doctor --db`) and never run from `th ls` — a status command
@@ -307,9 +319,16 @@ call rather than added context, the fix is one line: `triageExit` should return
 
 Each worktree gets `COMPOSE_PROJECT_NAME=<app>_<slug>` in the `.env` of every
 directory that actually holds a compose file, and a deterministic port offset
-applied to every `PORT`/`*_PORT` key the main checkout declares. Same branch, same
-ports, every run: the registry is the sibling `.env` files themselves, so there is
-no state file to garbage-collect.
+applied to every `PORT`/`*_PORT` key the main checkout declares. The registry is
+the sibling `.env` files themselves, so there is no state file to
+garbage-collect.
+
+The offset is derived from the branch name, so the same branch normally lands on
+the same ports — but that is **not** a guarantee over time. The offset has to
+dodge ports already claimed by main and by every sibling worktree, so adding a
+worktree that happens to want yours will move you on the next `hydrate`, and
+your containers come back on new ports. Deterministic given the fleet; not
+stable across changes to it.
 
 **Caveat:** this shifts the ports your app processes bind. A compose file's own
 `ports: "3000:3000"` host mapping is **not** rewritten — parameterize it

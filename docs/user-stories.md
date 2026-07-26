@@ -60,6 +60,7 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 
 **L2. `treehouse ls` — one table, everything.** As a Dev with 4 worktrees, I see worktree × branch × {env, services, db, seed, behind-main, dirty} at a glance, so I spot the broken one before assigning an agent to it.
 
+- **Open (found 2026-07-26):** the db column is clone-exists-only, so a worktree whose clone exists but whose `.env` still names the shared database reads `db: ok` here while `doctor` calls it a failure and exits 2. `ls --json`'s `status` is `worstEnv(rows)` while `doctor --json`'s is `check.Verdict` — same field, same schema number, different meaning. Both need reconciling.
 - AC: `--json` for tooling; current worktree highlighted; state columns reuse doctor (no second implementation). (Absorbs the old "fleet view" epic. `wt`/`wtdb status` show git/db columns only — the state columns are the differentiator.)
 - ✅ **Done (2026-07-26).** `th ls` shows worktree × branch × env × behind-main × dirty, current row marked, `--json` in the same envelope doctor uses. The row is computed by `check.Doctor.Status` — one worktree, no I/O — so T1's TUI streams rows instead of reimplementing them. Services/db/seed columns arrive with their epics.
 
@@ -97,6 +98,8 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 - AC: seed steps run against the worktree's db; ~~a check query reports loaded datasets by name~~ → **a marker table treehouse writes itself**.
 - ✅ **Done (2026-07-26).** `th seed <name>` runs the `[[seed]]` command against this worktree's clone; `th doctor --db` reports which datasets are present.
 - **Cut: the per-seed `check` config key.** It assumed projects track their own seed state; almost none do, so the key would have been unfillable for nearly everybody — and a config key most people can't fill is a feature most people don't get. Instead treehouse writes `treehouse_seed(name, applied_at)` into the worktree's **own** database. That choice pays three ways: it rides the `TEMPLATE` copy, so a clone correctly inherits main's datasets; it is dropped with the database; and there is **no state file to garbage-collect** — the same principle the port registry follows. `th seed` refuses to run against the shared database, because seeding it through a half-applied hydrate is not recoverable by re-running anything.
+
+**Ceiling on all of Epic A (2026-07-26):** every identifier interpolated into SQL is checked against `^[a-z_][a-z0-9_]*$` and refused otherwise — refuse rather than escape. Legal-but-quoted names (`app-db`, `APPDB`) are refused too, so such a repo gets no clones at all, permanently, with one skip line.
 
 **A5. Clone garbage collection.** `treehouse gc` lists db clones whose worktrees are gone and drops them after confirmation. (L3 prevents; gc cures.)
 
@@ -165,7 +168,7 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 
 **E2. Compose namespace per worktree.** ✅ **Done (2026-07-26).** `hydrate` writes `COMPOSE_PROJECT_NAME=<app>_<slug>` into the `.env` of every directory that actually holds a compose file — a repo with no compose file gets no key anywhere. `<app>` is main's own `COMPOSE_PROJECT_NAME` if it has one, else Compose's default rule (the main checkout's directory name).
 
-**E3. Cheap port offsets.** ✅ **Done (2026-07-26).** `hydrate` shifts every `PORT`/`*_PORT` key main declares by one offset derived from the branch slug, checked against the ports every sibling worktree declares. One offset for all services, so inter-service spacing survives; same branch → same ports, because the registry is the sibling `.env` files and there is no state file to garbage-collect. Ceilings, on purpose: detection is by key name (`SERVER_ADDR=:3000` is invisible), "free" means undeclared rather than unbound on the host, and a compose file's `ports:` host mapping is **not** rewritten — parameterize it. Full proxy/subdomain routing stays punted to portree.
+**E3. Cheap port offsets.** ✅ **Done (2026-07-26).** `hydrate` shifts every `PORT`/`*_PORT` key main declares by one offset derived from the branch slug, checked against the ports every sibling worktree declares. One offset for all services, so inter-service spacing survives; same branch → same ports *given the same fleet*, because the registry is the sibling `.env` files and there is no state file to garbage-collect — but adding a worktree that wants your offset moves you on the next hydrate, so it is deterministic, not stable over time. Ceilings, on purpose: detection is by key name (`SERVER_ADDR=:3000` is invisible), "free" means undeclared rather than unbound on the host, and a compose file's `ports:` host mapping is **not** rewritten — parameterize it. Full proxy/subdomain routing stays punted to portree.
 
 ---
 
