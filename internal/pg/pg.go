@@ -9,8 +9,8 @@
 //
 // Everything goes through psql, including the create and the drop, rather than
 // through createdb/dropdb. Those two wrappers buy nothing here (they quote the
-// identifiers, and check.Ident has already refused anything that would need
-// quoting) and they cost the one thing that matters: a repo whose Postgres only
+// identifiers, which check.Quote already does) and they cost the one thing that
+// matters: a repo whose Postgres only
 // exists inside compose sets [database] psql and gets ALL of treehouse, not just
 // the read-only half.
 package pg
@@ -122,7 +122,7 @@ func Create(name, template string) error {
 	if err := checkIdent(name, template); err != nil {
 		return err
 	}
-	_, err := psql(maintenanceDB, "CREATE DATABASE "+name+" TEMPLATE "+template)
+	_, err := psql(maintenanceDB, "CREATE DATABASE "+check.Quote(name)+" TEMPLATE "+check.Quote(template))
 	return busy(err)
 }
 
@@ -135,7 +135,7 @@ func Drop(name string) error {
 	if err := checkIdent(name); err != nil {
 		return err
 	}
-	_, err := psql(maintenanceDB, "DROP DATABASE IF EXISTS "+name)
+	_, err := psql(maintenanceDB, "DROP DATABASE IF EXISTS "+check.Quote(name))
 	return busy(err)
 }
 
@@ -189,9 +189,9 @@ func Comment(db, text string) error {
 	if err := checkIdent(db); err != nil {
 		return err
 	}
-	// db is validated and interpolated (an identifier cannot be a bind
-	// parameter); text goes through psql's :'c', which quotes it as a literal.
-	_, err := psql(maintenanceDB, "COMMENT ON DATABASE "+db+" IS :'c'", "--set=c="+text)
+	// db is quoted as an identifier (an identifier cannot be a bind parameter);
+	// text goes through psql's :'c', which quotes it as a literal.
+	_, err := psql(maintenanceDB, "COMMENT ON DATABASE "+check.Quote(db)+" IS :'c'", "--set=c="+text)
 	return err
 }
 
@@ -236,16 +236,15 @@ func Seeds(db string) ([]string, error) {
 	return lines(out), nil
 }
 
-// checkIdent is the injection guard, and it stands in front of every identifier
-// that reaches an argv or a SQL string. check.Slug's output is safe by
-// construction, but a template name comes out of the user's .env and is
-// arbitrary text — so the rule is refuse, never escape. The rule itself is
-// check's, so the planner and this boundary cannot drift apart on what "safe"
-// means.
+// checkIdent stands in front of every identifier that reaches an argv or a SQL
+// string. Injection is check.Quote's job now; this is the smaller, harder guard
+// — the names nothing can rescue (empty, over Postgres's 63-byte cap, or
+// carrying a NUL or a line break). The rule itself is check's, so the planner
+// and this boundary cannot drift apart on what "usable" means.
 func checkIdent(names ...string) error {
 	for _, name := range names {
-		if !check.Ident(name) {
-			return fmt.Errorf("refusing %q as a database name: not a plain identifier", name)
+		if why := check.IdentReason(name); why != "" {
+			return fmt.Errorf("refusing %q as a database name: %s", name, why)
 		}
 	}
 	return nil

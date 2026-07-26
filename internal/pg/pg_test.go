@@ -11,22 +11,20 @@ import (
 	"github.com/Blynkosaur/treehouse/internal/check"
 )
 
-// TestRefusesNonIdentifiers proves the guard runs BEFORE any subprocess does.
+// TestRefusesUnusableNames proves the guard runs BEFORE any subprocess does.
 // No Postgres is required to show it: with the cluster unreachable, a name that
 // reached exec would come back as a connection failure, so a refusal message is
 // itself the evidence that nothing was ever handed to psql.
-func TestRefusesNonIdentifiers(t *testing.T) {
+//
+// The list is short on purpose. Quoting handles every name Postgres will hold;
+// what is left is only what nothing can rescue.
+func TestRefusesUnusableNames(t *testing.T) {
 	bad := []string{
-		"",
-		"app; DROP DATABASE postgres",
-		"app db",
-		"app-db",   // legal in quoted SQL, refused on purpose: we never quote
-		"App",      // upper case would need quoting to survive a round trip
-		"1app",     // identifiers cannot open with a digit
-		"app'--",   // the classic
-		"app\ndb",  // a newline inside an argv element
-		`app"; --`, // an attempt to close a quoted identifier
-		"täst",     // non-ASCII: legal to Postgres, outside the rule we enforce
+		"",                      // no name to quote
+		"app\x00db",             // C strings end at the NUL: the server sees "app"
+		"app\ndb",               // psql reads stdin line by line
+		"app\rdb",               // and a CR is a line break to some of it
+		strings.Repeat("d", 64), // Postgres truncates at 63, silently
 	}
 
 	for _, name := range bad {
@@ -38,6 +36,9 @@ func TestRefusesNonIdentifiers(t *testing.T) {
 				"Sessions":    errOf(Sessions(name)),
 				"Terminate":   Terminate(name),
 				"Comment":     Comment(name, "treehouse:/tmp:main"),
+				"Drop":        Drop(name),
+				"MarkSeed":    MarkSeed(name, "ramp"),
+				"Seeds":       errOf(Seeds(name)),
 			}
 			for entry, err := range calls {
 				if err == nil {
@@ -51,16 +52,76 @@ func TestRefusesNonIdentifiers(t *testing.T) {
 	}
 }
 
-// TestAcceptsSlugShapedNames is the other half: the guard must not reject what
-// check.Slug and check.DBName actually produce, or the whole feature refuses
-// itself. Reachability is irrelevant here — we only assert the error is NOT the
-// refusal, so this passes with or without a running cluster.
-func TestAcceptsSlugShapedNames(t *testing.T) {
-	for _, name := range []string{"app_wt_main", "myproject_wt_feat_a_b_8664d8", "_wt_x", "a"} {
+// TestAcceptsQuotableNames is the other half, and it is the whole point of
+// quoting rather than refusing: every one of these was refused before, and a
+// repo whose database is called app-db got no clones at all, permanently.
+//
+// It asserts only that the error is NOT the refusal, so it passes with or
+// without a running cluster — including the shapes that look like injection,
+// because a doubled quote cannot escape a quoted identifier.
+func TestAcceptsQuotableNames(t *testing.T) {
+	for _, name := range []string{
+		"app_wt_main", "myproject_wt_feat_a_b_8664d8", "_wt_x", "a",
+		"app-db", "APPDB", "app db", "täst", "1app",
+		`app"; DROP DATABASE postgres; --`,
+		"app'--",
+	} {
 		if err := Comment(name, "treehouse:/tmp:main"); err != nil &&
 			strings.Contains(err.Error(), "refusing") {
-			t.Errorf("%q is the shape DBName produces, but the guard refused it", name)
+			t.Errorf("%q is a name Postgres will hold, but the guard refused it", name)
 		}
+	}
+}
+
+// TestQuotedNamesSurviveTheCluster is the live half of the one above: quoting is
+// only correct if Postgres agrees, and no unit test can say whether it does.
+// Each name here was refused outright before this change.
+func TestQuotedNamesSurviveTheCluster(t *testing.T) {
+	if err := exec.Command("pg_isready").Run(); err != nil {
+		t.Skip("no postgres server responding")
+	}
+	for _, name := range []string{
+		"th-selftest-db",    // a dash: legal, needs quoting
+		"THSelfTestDB",      // upper case: quoting is what preserves it
+		`th"selftest`,       // an embedded quote, which Quote doubles
+		"th selftest space", // a space
+		"th;selftest--",     // the shape an injection attempt has
+	} {
+		t.Run(name, func(t *testing.T) {
+			_ = Drop(name)
+			t.Cleanup(func() { _ = Drop(name) })
+
+			if err := Create(name, "template1"); err != nil {
+				t.Fatalf("Create(%q): %v", name, err)
+			}
+			names, err := Databases()
+			if err != nil {
+				t.Fatalf("Databases: %v", err)
+			}
+			// Verbatim, not case-folded and not mangled: an unquoted CREATE would
+			// have made "thselftestdb" and left us reporting a clone that isn't
+			// the one .env names.
+			if !contains(names, name) {
+				t.Fatalf("Create made something other than %q: %v", name, names)
+			}
+			// postgres must still be there — the injection shapes above would have
+			// dropped it if the quoting were wrong.
+			if !contains(names, "postgres") {
+				t.Fatalf("%q took out the maintenance database", name)
+			}
+			if err := Comment(name, "treehouse:/tmp:feat/a"); err != nil {
+				t.Errorf("Comment(%q): %v", name, err)
+			}
+			if _, err := Sessions(name); err != nil {
+				t.Errorf("Sessions(%q): %v", name, err)
+			}
+			if err := MarkSeed(name, "ramp"); err != nil {
+				t.Errorf("MarkSeed(%q): %v", name, err)
+			}
+			if err := Drop(name); err != nil {
+				t.Errorf("Drop(%q): %v", name, err)
+			}
+		})
 	}
 }
 

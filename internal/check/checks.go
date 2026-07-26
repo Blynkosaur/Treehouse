@@ -39,6 +39,12 @@ type DBState struct {
 func (d Doctor) CheckDB(s DBState) Check {
 	c := Check{Name: "db"}
 	switch {
+	case s.Plan.Bad:
+		// Ahead of the main case on purpose: an unusable template name is a fact
+		// about the REPO, and it is just as true standing in main. Reporting main
+		// as fine would hide the reason every other worktree gets no clone.
+		c.Status, c.Detail = "fail", s.Plan.Skip
+		c.Fix = "rename the database, or point DATABASE_URL at a name Postgres can hold"
 	case s.Main:
 		// Main legitimately talks to the template — it is not a worktree that
 		// should have a clone, and reporting it as one would train people to

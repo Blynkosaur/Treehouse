@@ -3,23 +3,61 @@ package check
 import (
 	"fmt"
 	"net/url"
-	"regexp"
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
-// identRE is Postgres's unquoted identifier shape, narrowed to lower case
-// because everything treehouse generates is lower case anyway.
-var identRE = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+// Quote renders name as a Postgres quoted identifier: wrapped in double quotes,
+// with any embedded double quote doubled. That is the whole rule, it is
+// well-defined, and it is what makes a legal name like app-db or APPDB work.
+//
+// Refusing anything that needed quoting was the earlier instinct, and it was
+// wrong in the direction that matters. The injection it dodged is dodged just as
+// completely here — a " cannot escape a doubled " — while the cost was a whole
+// feature silently not working, permanently, for a repo whose database happens
+// to have a dash in its name. IdentReason still refuses the inputs quoting
+// cannot rescue.
+func Quote(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
 
-// Ident reports whether name is a plain identifier — the only shape treehouse
-// will put in a createdb argv or interpolate into SQL. Slug's output always
-// passes by construction, but a template database name is read out of the
-// user's .env and is arbitrary text; the answer to an odd one is to refuse it,
-// not to escape it. internal/pg asks again at the boundary, against this same
-// rule: one definition, because two would eventually disagree.
-func Ident(name string) bool { return identRE.MatchString(name) }
+// IdentReason names why a database name cannot be used at all, or "" when it
+// can. It is no longer a shape test — Quote handles shape — only a refusal of
+// what nothing can rescue:
+//
+//   - empty: there is no name to quote.
+//   - over 63 bytes: Postgres truncates identifiers silently, and two branches
+//     truncated to the same 63 bytes share one database, which is the exact
+//     failure Slug's hash suffix exists to prevent.
+//   - a NUL: C strings end there, so the server would see a shorter name than
+//     the one we quoted.
+//   - a newline or carriage return: these ride into psql as `--set` values and
+//     through its stdin, where a line break is a statement boundary.
+//
+// It returns the reason rather than a bool because both callers have to SAY it:
+// a name treehouse won't touch is a loud check with a fix line, never a shrug.
+//
+// ponytail: a name containing "=" still reaches psql's -d, which libpq reads as
+// a conninfo string rather than a database name. Passing it through PGDATABASE
+// instead would fix that and break `[database] psql = "docker compose exec …"`,
+// which does not forward host environment into the container. Rename the
+// database if you are the one person this happens to.
+func IdentReason(name string) string {
+	switch {
+	case name == "":
+		return "it is empty"
+	case len(name) > 63:
+		return fmt.Sprintf("it is %d bytes and Postgres truncates identifiers at 63", len(name))
+	case strings.ContainsAny(name, "\x00\n\r"):
+		return "it contains a NUL, a newline or a carriage return"
+	}
+	return ""
+}
+
+// Ident is IdentReason as the predicate most callers want.
+func Ident(name string) bool { return IdentReason(name) == "" }
 
 // DBName is the clone's name: a hint of which app it belongs to, then the slug
 // that makes it unique.
@@ -34,6 +72,12 @@ func Ident(name string) bool { return identRE.MatchString(name) }
 func DBName(base, slug string) string {
 	if len(base) > 12 {
 		base = base[:12]
+		// A template name is any legal Postgres identifier now that we quote
+		// rather than refuse, so it may be multi-byte — and byte 12 can land
+		// inside a rune. Half a rune is not a name.
+		for len(base) > 0 && !utf8.ValidString(base) {
+			base = base[:len(base)-1]
+		}
 	}
 	// Trimming keeps "app_" from deriving app__wt_x. Legality survives it: a
 	// prefix of an identifier is an identifier, and "" leaves a leading _.
@@ -200,6 +244,13 @@ type DBPlan struct {
 	Template string
 	Exists   bool   // already there — a no-op, so re-running hydrate reuses the clone
 	Skip     string // why nothing will be created
+
+	// Bad marks a Skip that is a FAILURE rather than an absence: the template
+	// database has a name treehouse cannot use at all. Every other reason to do
+	// nothing is a legitimate "this repo has no clone to make"; this one means a
+	// repo that WANTS clones will never get one, and a quiet skip line is how
+	// that goes unnoticed for a month.
+	Bad bool
 }
 
 // PlanDB decides this worktree's database clone.
@@ -219,8 +270,9 @@ func (d Doctor) PlanDB(in DBInput) DBPlan {
 		return DBPlan{Skip: "detached HEAD — no stable name for a database clone"}
 	case in.Template == "":
 		return DBPlan{Skip: "no DATABASE_URL or POSTGRES_DB in the main checkout — a clone would have nothing pointing at it"}
-	case !Ident(in.Template):
-		return DBPlan{Skip: fmt.Sprintf("template database %q is not a plain identifier — refusing to quote it into SQL", in.Template)}
+	}
+	if why := IdentReason(in.Template); why != "" {
+		return DBPlan{Bad: true, Skip: fmt.Sprintf("template database %q cannot be used: %s", in.Template, why)}
 	}
 
 	plan := DBPlan{Name: DBName(in.Template, in.Slug), Template: in.Template}
