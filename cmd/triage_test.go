@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // runTri runs th with stdin attached and stdout/stderr kept APART, because
@@ -69,6 +70,70 @@ func TestTriageWrapperIsTransparent(t *testing.T) {
 		_, errOut, code := runTri(t, dir, "", "triage", "--", "sh", "-c", "exit 0")
 		if code != 0 || strings.Contains(errOut, "th triage:") {
 			t.Errorf("exit %d, stderr %q — nothing failed, so there is nothing to say", code, errOut)
+		}
+	})
+
+	// 128+n is what a Makefile or a CI runner reads to tell a ^C (130) from an
+	// OOM kill (137). A flat 128 for every signal loses exactly the distinction
+	// anyone consults this number for.
+	t.Run("a signalled command is 128+signal", func(t *testing.T) {
+		for _, tc := range []struct {
+			signal string
+			want   int
+		}{{"INT", 130}, {"TERM", 143}, {"KILL", 137}} {
+			_, _, code := runTri(t, dir, "", "triage", "--", "sh", "-c", "kill -"+tc.signal+" $$")
+			if code != tc.want {
+				t.Errorf("SIG%s: exit %d, want %d", tc.signal, code, tc.want)
+			}
+		}
+	})
+
+	// The wrapper is meant to sit in front of a test run, so its output has to
+	// arrive AS it happens — a buffer flushed at the end turns a ten-minute suite
+	// into ten minutes of silence.
+	t.Run("output streams rather than landing at the end", func(t *testing.T) {
+		cmd := exec.Command(thBin, "triage", "--", "sh", "-c", "echo first; sleep 3; exit 1")
+		cmd.Dir = dir
+		pipe, err := cmd.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = cmd.Wait() }()
+
+		got := make(chan string, 1)
+		go func() {
+			buf := make([]byte, 64)
+			n, _ := pipe.Read(buf)
+			got <- string(buf[:n])
+		}()
+		select {
+		case line := <-got:
+			if !strings.Contains(line, "first") {
+				t.Errorf("first read was %q, want the wrapped command's first line", line)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("nothing on stdout after 2s — the wrapper is buffering, not streaming")
+		}
+	})
+
+	// tailMax is 256 KiB, and the evidence in a failing run is always at the
+	// END: the traceback, the summary line. A head-capped buffer would hold
+	// nothing but the tests that passed before it broke.
+	t.Run("the tail buffer keeps the end of a large output", func(t *testing.T) {
+		script := `awk 'BEGIN{for(i=0;i<8000;i++)print "filler line padding padding padding padding"}'` +
+			`; echo "KeyError: 'KEY'"; exit 1`
+		out, errOut, code := runTri(t, dir, "", "triage", "--", "sh", "-c", script)
+		if code != 1 {
+			t.Fatalf("exit %d, want 1", code)
+		}
+		if len(out) < tailMax {
+			t.Fatalf("test produced %d bytes, less than the %d-byte buffer it must overflow", len(out), tailMax)
+		}
+		if !strings.Contains(errOut, "missing-env") {
+			t.Errorf("the last line was not triaged — the buffer kept the head:\n%s", errOut)
 		}
 	})
 
@@ -198,6 +263,58 @@ func TestTriageHook(t *testing.T) {
 			t.Fatal("the hook re-ran tool_input.command")
 		}
 	})
+}
+
+// TestHookSurvivesMalformedPayloads: the hook runs after EVERY Bash tool call,
+// so a shape it cannot read must cost the session nothing. The invariant is not
+// "never fails" — a payload that isn't JSON deserves to be visible in
+// `claude --debug` — it is that stdout is ALWAYS either empty or the output
+// protocol, because Claude Code parses whatever lands there. A half-written
+// object or a stray line would corrupt the session, and a hang would wedge it.
+func TestHookSurvivesMalformedPayloads(t *testing.T) {
+	dir := driftedRepo(t)
+	fail := `{"stdout":"","stderr":"KeyError: 'KEY'","interrupted":false}`
+
+	for _, tc := range []struct{ name, stdin string }{
+		{"empty stdin", ""},
+		{"not json at all", "garbage{{{"},
+		{"an empty object", "{}"},
+		{"an array where an object belongs", "[1,2,3]"},
+		{"a bare string", `"hello"`},
+		{"null tool_response", `{"tool_name":"Bash","tool_response":null}`},
+		{"missing tool_response", `{"tool_name":"Bash"}`},
+		{"null tool_name", `{"tool_name":null,"tool_response":` + fail + `}`},
+		{"tool_response is a bare string", `{"tool_name":"Bash","tool_response":"KeyError: 'KEY'"}`},
+		{"tool_response is a number", `{"tool_name":"Bash","tool_response":123}`},
+		{"tool_response is an array", `{"tool_name":"Bash","tool_response":[{"text":"KeyError: 'KEY'"}]}`},
+		{"null cwd", `{"tool_name":"Bash","cwd":null,"tool_response":` + fail + `}`},
+		{"a cwd that no longer exists", `{"tool_name":"Bash","cwd":"/no/such/dir","tool_response":` + fail + `}`},
+		{"empty stdout and stderr", `{"tool_name":"Bash","tool_response":{"stdout":"","stderr":""}}`},
+		{"a megabyte of output", `{"tool_name":"Bash","tool_response":{"stdout":"` +
+			strings.Repeat("x", 1<<20) + `","stderr":"KeyError: 'KEY'"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, _, code := runTri(t, dir, tc.stdin, "triage", "--hook")
+			if code != 0 && code != 1 && code != 2 {
+				t.Errorf("exit %d — a hook may only ever answer 0, 1 or 2", code)
+			}
+			if out == "" {
+				return // silence is always allowed
+			}
+			var got struct {
+				HookSpecificOutput struct {
+					HookEventName     string `json:"hookEventName"`
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("stdout is not the output protocol: %v\n%s", err, out)
+			}
+			if got.HookSpecificOutput.HookEventName != "PostToolUse" {
+				t.Errorf("stdout is JSON but not ours: %s", out)
+			}
+		})
+	}
 }
 
 // hookPayloadJSON loads the checked-in fixture and points it at dir, so the

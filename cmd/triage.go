@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
 	"github.com/Blynkosaur/treehouse/internal/config"
@@ -86,10 +87,15 @@ func triageWrap(args []string) error {
 
 	code := exit.ExitCode()
 	if code < 0 {
-		// Killed by a signal, so there is no exit code to pass through. 128 is
-		// the shell's "signalled" band; ponytail: the signal number itself needs
-		// syscall.WaitStatus, which is not worth a build tag.
+		// Killed by a signal, so there is no exit code to pass through. Report
+		// the shell's own 128+n, which is what a Makefile or a CI runner reads to
+		// tell a ^C (130) from an OOM kill (137) — a flat 128 loses exactly the
+		// distinction anyone looks at this number for. syscall.WaitStatus answers
+		// on every platform Go builds for; Windows simply always says no.
 		code = 128
+		if ws, ok := exit.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			code = 128 + int(ws.Signal())
+		}
 	}
 	return exitCode(code)
 }
