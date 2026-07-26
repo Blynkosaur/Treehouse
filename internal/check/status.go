@@ -1,5 +1,11 @@
 package check
 
+import (
+	"os/exec"
+	"strconv"
+	"strings"
+)
+
 // Status is one worktree's row in the fleet view — pure data, no presentation.
 // Deliberately per-worktree rather than a batch API: the TUI streams cells in
 // concurrently, and a batch call would make it wait for the slowest worktree.
@@ -31,6 +37,52 @@ func (d Doctor) Status(w Worktree, ref Ref, source Worktree) Status {
 		}
 	}
 	return s
+}
+
+// Row gathers one worktree's live state and folds it into its row: the two
+// questions Status refuses to ask (dirty, behind) plus the env walk behind it.
+//
+// It shells git and touches the filesystem where Status does neither — that is
+// the split, not an accident: Status stays a pure fold so it can be tested from
+// struct literals, and Row is the one place that fills a Ref in. It lives here
+// rather than in cmd/ls.go because a gatherer inlined in a print loop has no
+// callers: the fleet view is meant to be a renderer over []Status, and the
+// second renderer would otherwise have to reimplement this.
+func (d Doctor) Row(ref Ref, source Worktree) Status {
+	ref.Dirty = gitDirty(ref.Path)
+	ref.Behind = gitBehind(ref.Path, d.MainBranch)
+	wt, _ := Discover(ref.Path) // unreadable worktree: still list it
+	return d.Status(wt, ref, source)
+}
+
+// gitDirty reports uncommitted changes. A bare or unreadable worktree answers
+// "clean" — the fleet view lists what it can and never fails over one bad row.
+func gitDirty(path string) bool {
+	out, err := gitOut(path, "status", "--porcelain")
+	return err == nil && strings.TrimSpace(out) != ""
+}
+
+// gitBehind counts commits the main branch has that this worktree doesn't.
+func gitBehind(path, mainBranch string) int {
+	if mainBranch == "" {
+		return 0 // detached or bare main: nothing to be behind
+	}
+	out, err := gitOut(path, "rev-list", "--count", "HEAD.."+mainBranch)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+func gitOut(cwd string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = cwd
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // EnvStatus folds findings into the one word the exit code, the --json envelope

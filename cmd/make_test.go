@@ -11,6 +11,9 @@ import (
 // thBin is the built `th` binary, compiled once in TestMain.
 var thBin string
 
+// raceBuild is set by race_test.go when the suite itself is built with -race.
+var raceBuild bool
+
 func TestMain(m *testing.M) {
 	// Skip the whole suite gracefully if the toolchain isn't here; the run()
 	// helper re-checks per test so `go test` still reports skips, not failures.
@@ -28,7 +31,11 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	thBin = filepath.Join(dir, "th")
-	build := exec.Command("go", "build", "-o", thBin, ".")
+	args := []string{"build", "-o", thBin, "."}
+	if raceBuild {
+		args = append([]string{"build", "-race"}, args[1:]...)
+	}
+	build := exec.Command("go", args...)
 	build.Dir = repoRoot
 	if out, err := build.CombinedOutput(); err != nil {
 		panic("build failed: " + err.Error() + "\n" + string(out))

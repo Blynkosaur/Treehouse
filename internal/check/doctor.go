@@ -10,7 +10,8 @@ import (
 // Doctor examines worktrees and reports findings. Required is the curated list
 // from treehouse.toml; more fields arrive with services and data checks.
 type Doctor struct {
-	Required []string // keys whose absence is a FAIL, not a WARN
+	Required   []string // keys whose absence is a FAIL, not a WARN
+	MainBranch string   // what Row measures "behind" against; empty = main is detached or bare
 }
 
 // Finding is one directory's env-drift verdict — pure data, no presentation.

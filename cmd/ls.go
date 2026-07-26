@@ -1,11 +1,12 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
+	"sync"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
 	"github.com/Blynkosaur/treehouse/internal/config"
@@ -36,20 +37,32 @@ func runLs(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// git always reports at least the main checkout, so an empty list means the
+	// porcelain said something we don't understand — say so instead of indexing
+	// [0] and panicking in the user's face.
+	if len(refs) == 0 {
+		return errors.New("no worktrees found")
+	}
 	mainRoot := refs[0].Path
 	source, _ := check.Discover(mainRoot)
 	cfg, _ := config.Load(mainRoot)
-	d := check.Doctor{Required: cfg.Env.Required}
+	d := check.Doctor{Required: cfg.Env.Required, MainBranch: refs[0].Branch}
 
-	rows := make([]check.Status, 0, len(refs))
-	for _, ref := range refs {
-		ref.Dirty = gitDirty(ref.Path)
-		ref.Behind = gitBehind(ref.Path, refs[0].Branch)
-		wt, _ := check.Discover(ref.Path) // unreadable worktree: still list it
-		row := d.Status(wt, ref, source)
-		row.Current = samePath(ref.Path, cwd)
-		rows = append(rows, row)
+	// Every row is an independent pair of git round trips plus a tree walk, and
+	// they share nothing — so they run at once. Each goroutine owns exactly one
+	// preallocated slot, which is what buys concurrency with no mutex and no
+	// append race, and keeps the output in git's order (main first).
+	rows := make([]check.Status, len(refs))
+	var wg sync.WaitGroup
+	for i, ref := range refs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rows[i] = d.Row(ref, source)
+			rows[i].Current = samePath(ref.Path, cwd)
+		}()
 	}
+	wg.Wait()
 
 	if jsonOut {
 		return printJSON(struct {
@@ -115,27 +128,4 @@ func envCell(env string) string {
 	default:
 		return okStyle.Render("ok")
 	}
-}
-
-// gitDirty reports uncommitted changes. A bare or unreadable worktree answers
-// "clean" — ls lists what it can and never fails over one broken row.
-func gitDirty(path string) bool {
-	out, err := gitOut(path, "status", "--porcelain")
-	return err == nil && strings.TrimSpace(out) != ""
-}
-
-// gitBehind counts commits the main branch has that this worktree doesn't.
-func gitBehind(path, mainBranch string) int {
-	if mainBranch == "" {
-		return 0 // detached or bare main: nothing to be behind
-	}
-	out, err := gitOut(path, "rev-list", "--count", "HEAD.."+mainBranch)
-	if err != nil {
-		return 0
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(out))
-	if err != nil {
-		return 0
-	}
-	return n
 }
