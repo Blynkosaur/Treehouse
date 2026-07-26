@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 )
 
@@ -54,6 +55,115 @@ func DBFromURL(raw string) (string, bool) {
 		return "", false
 	}
 	return u.Path[1:], true
+}
+
+// TemplateDB is the shared database every clone is cut from: whatever main's
+// root .env points at. DATABASE_URL is the source of truth because it is what
+// an ORM actually dials; POSTGRES_DB is the compose-style fallback. Empty means
+// the repo declares no database — and then nothing is created at all, which is
+// what keeps `th new` in a non-Postgres repo from leaving orphans.
+func TemplateDB(source Worktree) string {
+	vars := source.EnvVarsByDir()["."]
+	if db, ok := DBFromURL(vars["DATABASE_URL"]); ok {
+		return db
+	}
+	return vars["POSTGRES_DB"]
+}
+
+// provenancePrefix opens every comment treehouse writes on a database it made.
+const provenancePrefix = "treehouse:"
+
+// Provenance is the comment left on a clone at creation time. It is the ONLY
+// thing that makes a database ours, and it is why gc never matches on a name
+// prefix: a prefix can match somebody's real database, and Slug is one-way, so
+// a name can't be reversed to the branch a human would need to see before
+// agreeing to a drop.
+func Provenance(mainRoot, branch string) string {
+	return provenancePrefix + mainRoot + ":" + branch
+}
+
+// ParseProvenance reads one back. It splits at the LAST colon because a Unix
+// path may legally contain one and a git branch may not — so the tail is always
+// the branch, whatever the path did.
+func ParseProvenance(comment string) (mainRoot, branch string, ok bool) {
+	rest, cut := strings.CutPrefix(comment, provenancePrefix)
+	if !cut {
+		return "", "", false
+	}
+	i := strings.LastIndex(rest, ":")
+	if i < 1 || i == len(rest)-1 {
+		return "", "", false // no branch, or no path: not a comment we wrote
+	}
+	return rest[:i], rest[i+1:], true
+}
+
+// Database is one database as the cluster reports it. Plain data gathered by
+// internal/pg and handed to PlanGC, so the collector's judgment can be tested
+// from struct literals instead of from a running Postgres.
+type Database struct {
+	Name    string
+	Comment string
+	Size    string // pg_size_pretty, for the confirmation prompt
+}
+
+// GCInput is everything PlanGC can't work out for itself.
+type GCInput struct {
+	Owned    []Database // every commented database in the cluster (pg.Commented)
+	Fleet    []Ref      // the worktrees that exist right now
+	Template string     // the shared database — never a candidate
+	MainRoot string     // only clones cut from THIS repo are in scope
+}
+
+// DBDrop is one database gc would remove, with everything a human needs to
+// agree to it: what it is called, whose branch it was, and how much it costs.
+type DBDrop struct {
+	Name   string `json:"name"`
+	Branch string `json:"branch"`
+	Size   string `json:"size"`
+}
+
+// PlanGC picks the clones whose worktrees are gone.
+//
+// Ownership is by comment, never by name prefix: anything without a treehouse
+// provenance comment naming THIS repo is not a candidate, full stop. That is
+// the whole safety model, and it is why Owned is the input rather than every
+// database in the cluster.
+//
+// Liveness is checked two ways, and either one spares a database. The branch is
+// the honest test — a clone is a corpse exactly when its worktree is gone — and
+// it is what the comment exists to record. The derived name is the belt: it
+// costs one map lookup and it means a template renamed since the clones were
+// cut (app_dev -> app_development) can't turn the whole live fleet into
+// candidates, which is the one way this could delete somebody's work.
+func (d Doctor) PlanGC(in GCInput) []DBDrop {
+	liveBranch := map[string]bool{}
+	liveName := map[string]bool{}
+	for _, ref := range in.Fleet {
+		if ref.Branch == "" {
+			continue // detached: it never had a clone to begin with
+		}
+		liveBranch[ref.Branch] = true
+		liveName[DBName(in.Template, Slug(ref.Branch))] = true
+	}
+
+	var drops []DBDrop
+	for _, db := range in.Owned {
+		root, branch, ok := ParseProvenance(db.Comment)
+		switch {
+		case !ok, root != in.MainRoot:
+			continue // somebody else's comment, or another repo's clone
+		case liveBranch[branch], liveName[db.Name]:
+			continue // still in use
+		case db.Name == in.Template:
+			// Unreachable through the comment — treehouse never writes one on a
+			// template — and checked anyway, because the cost of being wrong here
+			// is the shared development database.
+			continue
+		}
+		drops = append(drops, DBDrop{Name: db.Name, Branch: branch, Size: db.Size})
+	}
+	sort.Slice(drops, func(i, j int) bool { return drops[i].Name < drops[j].Name })
+	return drops
 }
 
 // DBInput is everything PlanDB can't work out for itself — the same bargain

@@ -55,7 +55,8 @@ func runRm(cmd *cobra.Command, args []string) error {
 	if within(cwd, target.Path) {
 		return fmt.Errorf("you are inside %s — cd out of it first", target.Path)
 	}
-	if target.Path == refs[0].Path {
+	mainRoot := refs[0].Path
+	if target.Path == mainRoot {
 		return fmt.Errorf("%s is the main worktree, not a removable one", target.Path)
 	}
 
@@ -77,6 +78,14 @@ func runRm(cmd *cobra.Command, args []string) error {
 	}
 	say("✓ removed worktree %s\n", target.Path)
 
+	// L3's whole promise: remove without corpses. The worktree is gone, so its
+	// clone is a corpse by gc's own definition — so run gc's plan against a fleet
+	// this worktree is no longer in, and act on the one row that is about this
+	// branch. Same ownership rule (a provenance comment naming this repo), same
+	// refusal to drop a database somebody is connected to. No clone, no comment,
+	// no Postgres: nothing to say.
+	dropClone(refs, target, mainRoot)
+
 	// -d refuses to drop unmerged work; that refusal is a feature, so report it
 	// and leave the branch rather than escalating on the user's behalf.
 	del := "-d"
@@ -89,6 +98,28 @@ func runRm(cmd *cobra.Command, args []string) error {
 	}
 	say("✓ deleted branch %s\n", branch)
 	return nil
+}
+
+// dropClone removes the database clone that belonged to the worktree just
+// removed — and nothing else. gone is excluded from the fleet so its clone
+// becomes a candidate; every OTHER corpse in the plan is left for `th gc`,
+// because `th rm feat/a` deleting feat/b's database would be a surprise.
+func dropClone(fleet []check.Ref, gone *check.Ref, mainRoot string) {
+	live := make([]check.Ref, 0, len(fleet))
+	for _, ref := range fleet {
+		if ref.Path != gone.Path {
+			live = append(live, ref)
+		}
+	}
+	drops, err := planGC(live, mainRoot)
+	if err != nil {
+		return // already reported; the worktree is gone either way
+	}
+	for _, d := range drops {
+		if d.Branch == gone.Branch {
+			collect([]check.DBDrop{d})
+		}
+	}
 }
 
 // unpushed counts commits on branch that exist on no remote. Repos with no

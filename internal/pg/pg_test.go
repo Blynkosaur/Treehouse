@@ -1,9 +1,14 @@
 package pg
 
 import (
+	"errors"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Blynkosaur/treehouse/internal/check"
 )
 
 // TestRefusesNonIdentifiers proves the guard runs BEFORE any subprocess does.
@@ -67,8 +72,8 @@ func TestCloneRoundTrip(t *testing.T) {
 	}
 
 	const name = "treehouse_selftest_wt_x"
-	_ = exec.Command("dropdb", "--if-exists", name).Run()
-	t.Cleanup(func() { _ = exec.Command("dropdb", "--if-exists", name).Run() })
+	_ = Drop(name)
+	t.Cleanup(func() { _ = Drop(name) })
 
 	// template1 exists in every cluster and nothing connects to it, so this
 	// exercises the happy path without depending on the developer's own dbs.
@@ -90,7 +95,7 @@ func TestCloneRoundTrip(t *testing.T) {
 	if err := Comment(name, provenance); err != nil {
 		t.Fatalf("Comment: %v", err)
 	}
-	got, err := psql("SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = '" + name + "'")
+	got, err := psql(maintenanceDB, "SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = '"+name+"'")
 	if err != nil {
 		t.Fatalf("reading the comment back: %v", err)
 	}
@@ -102,6 +107,96 @@ func TestCloneRoundTrip(t *testing.T) {
 	if _, err := Sessions(name); err != nil {
 		t.Errorf("Sessions on an idle database: %v", err)
 	}
+
+	// Commented is gc's entire input, so the row it produces has to be complete:
+	// no size means the confirmation prompt can't say what a drop buys back.
+	dbs, err := Commented()
+	if err != nil {
+		t.Fatalf("Commented: %v", err)
+	}
+	var row *check.Database
+	for i := range dbs {
+		if dbs[i].Name == name {
+			row = &dbs[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("Commented did not report %q, which we just commented: %+v", name, dbs)
+	}
+	if row.Comment != provenance || row.Size == "" {
+		t.Errorf("Commented row = %+v", *row)
+	}
+
+	// A clone with no seed run against it has no marker table, and that is the
+	// state every clone starts in — an empty answer, never an error.
+	seeds, err := Seeds(name)
+	if err != nil || len(seeds) != 0 {
+		t.Errorf("Seeds on a fresh clone = %v, %v — want empty and no error", seeds, err)
+	}
+	if err := MarkSeed(name, "ramp"); err != nil {
+		t.Fatalf("MarkSeed: %v", err)
+	}
+	if err := MarkSeed(name, "ramp"); err != nil {
+		t.Errorf("MarkSeed is not idempotent: %v", err) // re-seeding is the normal case
+	}
+	if seeds, err = Seeds(name); err != nil || !reflect.DeepEqual(seeds, []string{"ramp"}) {
+		t.Errorf("Seeds after MarkSeed = %v, %v", seeds, err)
+	}
+
+	if err := Drop(name); err != nil {
+		t.Fatalf("Drop: %v", err)
+	}
+	if names, err = Databases(); err != nil || contains(names, name) {
+		t.Errorf("Drop left %q behind: %v", name, err)
+	}
+	// gc lists first and drops second; a database that vanished in between is
+	// gc's goal, not gc's problem.
+	if err := Drop(name); err != nil {
+		t.Errorf("Drop of an already-absent database: %v", err)
+	}
+}
+
+// TestDropRefusesTheBusy proves the error a caller has to distinguish survives:
+// gc reports live connections rather than killing them, and it can only do that
+// if the busy case is separable from a real failure. Our own psql session is the
+// connection that blocks the drop.
+func TestDropRefusesTheBusy(t *testing.T) {
+	if err := exec.Command("pg_isready").Run(); err != nil {
+		t.Skip("no postgres server responding")
+	}
+	const name = "treehouse_selftest_busy"
+	_ = Drop(name)
+	t.Cleanup(func() { _ = Drop(name) })
+	if err := Create(name, "template1"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// pg_sleep inside the target database holds a connection open while we drop.
+	held := exec.Command(Psql[0], append(append([]string{}, Psql[1:]...),
+		"-d", name, "-At", "--no-psqlrc", "-c", "SELECT pg_sleep(10)")...)
+	if err := held.Start(); err != nil {
+		t.Skipf("could not hold a session open: %v", err)
+	}
+	defer func() { _ = held.Process.Kill() }()
+	waitForSession(t, name)
+
+	err := Drop(name)
+	if !errors.Is(err, ErrBusy) {
+		t.Errorf("Drop of a database in use = %v, want ErrBusy", err)
+	}
+}
+
+// waitForSession blocks until the held connection is visible in pg_stat_activity
+// — starting a subprocess is not the same as it having connected.
+func waitForSession(t *testing.T, db string) {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		if s, err := Sessions(db); err == nil && len(s) > 0 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Skip("the held session never appeared — cannot test the busy path")
 }
 
 func errOf[T any](_ T, err error) error { return err }

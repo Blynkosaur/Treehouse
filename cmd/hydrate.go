@@ -260,7 +260,7 @@ func hydrateDerive(root, sourceRoot string, source check.Worktree) error {
 // unreachable Postgres must not take that work down with it. The clone itself is
 // near-instant — Postgres copies the template at the file level.
 func hydrateDB(mainRoot, branch, slug string, source check.Worktree) string {
-	in := check.DBInput{Template: templateDB(source), Slug: slug}
+	in := check.DBInput{Template: check.TemplateDB(source), Slug: slug}
 
 	// Postgres is asked exactly once, and only when the plan would otherwise act.
 	// Planning twice is free (PlanDerive's sibling is a pure function), and it
@@ -271,7 +271,7 @@ func hydrateDB(mainRoot, branch, slug string, source check.Worktree) string {
 		if err != nil {
 			// Collapsed to one line: psql's connection error is three of them, and
 			// this prints on every `th new` for a dev whose server simply isn't up.
-			say("• db: skipped (postgres is not reachable: %s)\n", strings.Join(strings.Fields(err.Error()), " "))
+			say("• db: skipped (postgres is not reachable: %s)\n", oneLine(err))
 			return ""
 		}
 		in.Existing = names
@@ -301,7 +301,7 @@ func hydrateDB(mainRoot, branch, slug string, source check.Worktree) string {
 		}
 	}
 	if err := pg.Create(plan.Name, plan.Template); err != nil {
-		if errors.Is(err, pg.ErrTemplateBusy) {
+		if errors.Is(err, pg.ErrBusy) {
 			reportBusy(plan.Template)
 		} else {
 			say("✗ db: %v\n", err)
@@ -313,7 +313,7 @@ func hydrateDB(mainRoot, branch, slug string, source check.Worktree) string {
 	// Provenance carries the ORIGINAL branch name because Slug is one-way:
 	// without it `th gc` can see a stray clone but not say whose it is. Failing
 	// to record it costs a future gc, not this hydrate.
-	if err := pg.Comment(plan.Name, "treehouse:"+mainRoot+":"+branch); err != nil {
+	if err := pg.Comment(plan.Name, check.Provenance(mainRoot, branch)); err != nil {
 		say("! db: %s has no provenance comment (%v) — `th gc` won't recognise it\n", plan.Name, err)
 	}
 	return plan.Name
@@ -334,19 +334,6 @@ func reportBusy(template string) {
 		say("    %s\n", s)
 	}
 	sayln("  fix: stop the app and re-run, or `th hydrate --force-db` to disconnect it")
-}
-
-// templateDB resolves the shared database every clone is cut from: whatever
-// main's root .env points at. DATABASE_URL is the source of truth because it is
-// what an ORM actually dials; POSTGRES_DB is the compose-style fallback. Empty
-// means the repo declares no database — and then nothing is created at all,
-// which is what keeps `th new` in a non-Postgres repo from leaving orphans.
-func templateDB(source check.Worktree) string {
-	vars := source.EnvVarsByDir()["."]
-	if db, ok := check.DBFromURL(vars["DATABASE_URL"]); ok {
-		return db
-	}
-	return vars["POSTGRES_DB"]
 }
 
 // resolveApp names the compose project family. If main's root .env already
