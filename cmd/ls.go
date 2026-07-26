@@ -3,7 +3,6 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -29,7 +28,7 @@ func init() {
 // runLs is an adapter: ask git for the fleet, ask git the two per-worktree
 // questions check.Status can't (behind, dirty), then let check decide each row.
 func runLs(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
+	cwd, err := worktreeRoot()
 	if err != nil {
 		return err
 	}

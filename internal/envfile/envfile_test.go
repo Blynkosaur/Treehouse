@@ -380,6 +380,59 @@ func TestSetParseAgree(t *testing.T) {
 	}
 }
 
+// TestWritersAgreeOnBytes: hydrate writes DATABASE_URL with Create or Append,
+// derive later rewrites it with Set. Only Set quoted, so the same value round
+// tripped through one writer and not the other — and a value with a `#` in a
+// password came back truncated depending on which phase happened to write it.
+func TestWritersAgreeOnBytes(t *testing.T) {
+	values := []string{
+		"plain",
+		"postgres://u:p@localhost/db?sslmode=require",
+		"postgres://u:pa#ss@localhost/db", // # opens a comment unless quoted
+		"has spaces",
+		`has "quotes"`,
+		"has'single",
+		"trailing ",
+		"",
+	}
+	writers := map[string]func(string, map[string]string) error{
+		"Create": Create, "Append": Append, "Set": Set,
+	}
+	for _, v := range values {
+		t.Run(v, func(t *testing.T) {
+			bytesFor := map[string]string{}
+			for name, write := range writers {
+				path := filepath.Join(t.TempDir(), ".env")
+				if err := write(path, map[string]string{"DATABASE_URL": v}); err != nil {
+					t.Fatalf("%s: %v", name, err)
+				}
+				body := readFile(t, path)
+				if got := parse(t, body)["DATABASE_URL"]; got != v {
+					t.Errorf("%s: round trip lost the value: %q -> %q\n  file: %q", name, v, got, body)
+				}
+				// Append's marker block is its own; compare the declaration line.
+				for _, line := range strings.Split(body, "\n") {
+					if strings.HasPrefix(line, "DATABASE_URL=") {
+						bytesFor[name] = line
+					}
+				}
+			}
+			if bytesFor["Create"] != bytesFor["Set"] || bytesFor["Append"] != bytesFor["Set"] {
+				t.Errorf("the three writers disagree on the bytes for %q: %#v", v, bytesFor)
+			}
+		})
+	}
+}
+
+func parse(t *testing.T, body string) map[string]string {
+	t.Helper()
+	vars, err := Parse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return vars
+}
+
 // TestSetRejectsUnrepresentable: a pair the format cannot hold must be an error
 // with the file untouched, never a best-effort write. A newline in a value used
 // to inject a second key and re-append it on every run.

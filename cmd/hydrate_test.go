@@ -109,6 +109,35 @@ func TestHydrateInMainIsInert(t *testing.T) {
 	}
 }
 
+// TestHydrateFromSubdirectory: every command took os.Getwd as the worktree
+// root, so running hydrate from svc_a planned main's svc_a/.env at
+// svc_a/svc_a/.env — a second env file nothing loads, and the real one left
+// unhydrated. The root is git's answer, not the shell's.
+func TestHydrateFromSubdirectory(t *testing.T) {
+	main := gitignoredEnvRepo(t)
+	write(t, filepath.Join(main, "svc_a", ".env"), "TOKEN=abc\n")
+
+	if out, _, code := runSplit(t, main, "new", "feat", "--skip-deps"); code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	wt := filepath.Join(filepath.Dir(main), "app-feat")
+	// Wipe the worktree's copy so this hydrate has real work to do, then run it
+	// from the subdirectory rather than the root.
+	if err := os.Remove(filepath.Join(wt, "svc_a", ".env")); err != nil {
+		t.Fatal(err)
+	}
+	if out, _, code := runSplit(t, filepath.Join(wt, "svc_a"), "hydrate", "--skip-deps"); code != 0 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+
+	if got := parseEnv(readEnv(t, filepath.Join(wt, "svc_a", ".env")))["TOKEN"]; got != "abc" {
+		t.Errorf("svc_a/.env TOKEN = %q, want abc", got)
+	}
+	if _, err := os.Stat(filepath.Join(wt, "svc_a", "svc_a")); err == nil {
+		t.Error("hydrate treated the subdirectory as the worktree root: svc_a/svc_a exists")
+	}
+}
+
 // TestHydrateCreatesMissingDirs: a gitignored dir holding nothing but a .env
 // (secrets/, infra/) does not exist in a fresh checkout. Aborting there left the
 // worktree half-built with exit 1.

@@ -72,7 +72,7 @@ func TestMergeRules(t *testing.T) {
 
 	override := []check.DepRule{
 		{Name: ".venv", Action: check.Recreate, Command: "poetry install"}, // replaces default
-		{Name: "target", Action: check.Recreate, Command: "cargo build"},    // new → appends
+		{Name: "target", Action: check.Recreate, Command: "cargo build"},   // new → appends
 	}
 	merged := config.MergeRules(defaults, override)
 

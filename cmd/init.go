@@ -55,7 +55,7 @@ const treehouseTOML = `# treehouse.toml — shared, committed project config (li
 // runInit writes treehouseTOML to the current directory, refusing to overwrite
 // an existing file (O_EXCL) — an existing config is never a casualty.
 func runInit(cmd *cobra.Command, args []string) error {
-	root, err := os.Getwd()
+	root, err := worktreeRoot()
 	if err != nil {
 		return err
 	}

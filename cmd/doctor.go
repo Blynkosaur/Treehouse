@@ -3,7 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -35,7 +34,7 @@ func init() {
 // runDoctor is pure adapter: gather input, call internal/check, pick a face.
 // All judgment lives in check.Doctor — this file just talks to the terminal.
 func runDoctor(cmd *cobra.Command, args []string) error {
-	root, err := os.Getwd()
+	root, err := worktreeRoot()
 	if err != nil {
 		return err
 	}

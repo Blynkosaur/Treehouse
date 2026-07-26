@@ -37,7 +37,7 @@ func init() {
 // report. Every judgment it makes is about git plumbing, not about env state.
 func runNew(cmd *cobra.Command, args []string) error {
 	branch := args[0]
-	cwd, err := os.Getwd()
+	cwd, err := worktreeRoot()
 	if err != nil {
 		return err
 	}

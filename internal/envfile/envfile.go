@@ -95,6 +95,11 @@ const Marker = "# --- added by treehouse hydrate ---"
 // Append adds vars to the END of the file at path, under a marker comment,
 // preserving every existing byte. The file is created if it doesn't exist.
 // Keys are written sorted for deterministic output.
+//
+// Values go through quote, exactly as Set's do. The three writers agree on the
+// bytes because the same key is written by different phases — hydrate appends
+// DATABASE_URL, derive later Sets it — and a value that survives one round trip
+// but not the other is a difference no one can see until the app reads it back.
 func Append(path string, vars map[string]string) error {
 	if len(vars) == 0 {
 		return nil
@@ -117,7 +122,7 @@ func Append(path string, vars map[string]string) error {
 	var b strings.Builder
 	b.WriteString("\n" + Marker + "\n")
 	for _, k := range keys {
-		b.WriteString(k + "=" + vars[k] + "\n")
+		b.WriteString(k + "=" + quote(vars[k]) + "\n")
 	}
 	_, err = f.WriteString(b.String())
 	return err
@@ -255,7 +260,8 @@ func quote(v string) string {
 }
 
 // Create writes a brand-new env file from vars. It refuses to overwrite:
-// an existing file at path is an error, never a casualty.
+// an existing file at path is an error, never a casualty. Values are quoted the
+// same way Append's and Set's are — see Append.
 func Create(path string, vars map[string]string) error {
 	if err := checkVars(vars); err != nil {
 		return err
@@ -273,7 +279,7 @@ func Create(path string, vars map[string]string) error {
 	sort.Strings(keys)
 
 	for _, k := range keys {
-		if _, err := f.WriteString(k + "=" + vars[k] + "\n"); err != nil {
+		if _, err := f.WriteString(k + "=" + quote(vars[k]) + "\n"); err != nil {
 			return err
 		}
 	}

@@ -26,7 +26,7 @@ func init() {
 // secret. It reuses Worktree.EnvVarsByDir (same index doctor/hydrate read) and
 // never clobbers an existing .env.example.
 func runMake(cmd *cobra.Command, args []string) error {
-	root, err := os.Getwd()
+	root, err := worktreeRoot()
 	if err != nil {
 		return err
 	}

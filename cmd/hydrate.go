@@ -38,7 +38,7 @@ func init() {
 // runHydrate is a pure adapter (same shape as runDoctor): gather cwd, hand the
 // work to hydrateAll. All judgment lives in check.
 func runHydrate(cmd *cobra.Command, args []string) error {
-	root, err := os.Getwd()
+	root, err := worktreeRoot()
 	if err != nil {
 		return err
 	}

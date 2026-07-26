@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -41,6 +42,27 @@ func Execute() {
 	}
 	fmt.Fprintln(os.Stderr, "Error:", err)
 	os.Exit(1)
+}
+
+// worktreeRoot is where every command starts from — the root of the worktree
+// the human is standing in, not the directory they happen to be in.
+//
+// os.Getwd was wrong for all of them, and silently: run from a subdirectory,
+// Discover walks only that subtree and hydrate plans repairs at
+// <subdir>/<subdir>/.env, because the relative dirs it maps from main are
+// relative to a root that isn't one. git already knows the answer, per worktree.
+// Outside a repo there is nothing to ask, and cwd is the honest fallback —
+// doctor and make both work there, on .env.example alone.
+func worktreeRoot() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	out, err := gitOut(cwd, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return cwd, nil
+	}
+	return strings.TrimSpace(out), nil
 }
 
 // say is the one gate every human-facing line passes through: --quiet asks for

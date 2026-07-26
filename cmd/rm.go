@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,7 +32,7 @@ func init() {
 // is worse than no sweep at all.
 func runRm(cmd *cobra.Command, args []string) error {
 	branch := args[0]
-	cwd, err := os.Getwd()
+	cwd, err := worktreeRoot()
 	if err != nil {
 		return err
 	}
