@@ -89,29 +89,33 @@ func runLs(cmd *cobra.Command, args []string) error {
 	}
 	wg.Wait()
 
+	// Schema stays 2. The change is that `status` now means what doctor's means
+	// — check.Verdict, folded over every row — rather than the env column alone.
+	// Nothing consumes this field yet, and the two agreeing is worth more than a
+	// version bump announcing that they used to disagree.
 	if jsonOut {
-		return printJSON(struct {
+		if err := printJSON(struct {
 			Schema    int            `json:"schema"`
 			Root      string         `json:"root"`
 			Status    string         `json:"status"`
 			Worktrees []check.Status `json:"worktrees"`
-		}{2, mainRoot, worstEnv(rows), rows})
+		}{2, mainRoot, check.Fleet(rows), rows}); err != nil {
+			return err
+		}
+		return fleetVerdict(rows)
 	}
 	printFleet(rows)
-	return nil
+	return fleetVerdict(rows)
 }
 
-func worstEnv(rows []check.Status) string {
-	s := "ok"
-	for _, r := range rows {
-		if r.Env == "fail" {
-			return "fail"
-		}
-		if r.Env == "warn" {
-			s = "warn"
-		}
+// fleetVerdict gives `th ls` doctor's exit contract. An agent that has to parse
+// a table to find out whether the fleet is broken will eventually parse it
+// wrong; 2 means the same thing here it means everywhere else.
+func fleetVerdict(rows []check.Status) error {
+	if check.Fleet(rows) == "fail" {
+		return exitCode(2)
 	}
-	return s
+	return nil
 }
 
 // printFleet renders the fleet with the same table doctor --ls uses.
@@ -153,17 +157,25 @@ func dirtyCell(dirty bool) string {
 	return "—"
 }
 
-// dbCell renders the clone column. Blank means the question wasn't asked — no
-// database in this repo, or Postgres wasn't up — which is not the same as
-// "missing" and must not be coloured like it.
+// dbCell renders the clone column. Blank means the question was never asked —
+// this repo declares no database — which is not the same as "missing" and must
+// not be coloured like it; "skip" is the louder version, where we asked and
+// could not get an answer.
+//
+// "shared" is red because it is the one state in this table that costs data: the
+// clone exists, .env still names the template, and a migration run here lands on
+// every other worktree. It used to render green, next to the word "ok", in the
+// view people use to decide which worktree to hand an agent.
 func dbCell(db string) string {
 	switch db {
-	case "ok":
-		return okStyle.Render("ok")
-	case "missing":
-		return missingStyle.Render("missing")
-	case "shared":
-		return okStyle.Render("shared")
+	case "ok", "main":
+		return okStyle.Render(db)
+	case "missing", "adrift":
+		return emptyStyle.Render(db)
+	case "shared", "unusable":
+		return missingStyle.Render(db)
+	case "skip":
+		return "skip"
 	default:
 		return "—"
 	}

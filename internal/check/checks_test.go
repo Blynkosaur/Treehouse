@@ -111,34 +111,80 @@ func TestVerdict(t *testing.T) {
 	}
 }
 
-// TestStatusDBColumn: the fleet column answers clone-exists and nothing else,
-// and stays blank when the question was never asked — blank is not "missing",
-// and colouring it as one would send people looking for a database that this
-// repo has no concept of.
+// TestStatusDBColumn is ITEM 1's regression. The column used to answer
+// clone-exists only, so a worktree whose clone existed while its .env still
+// named the SHARED database read `db: ok` in the glance view — green, in the
+// table people use to pick which worktree to hand an agent — while `th doctor`
+// called the same state a failure and exited 2.
+//
+// It also pins the row's own verdict, because that is the field `ls --json`
+// folds and exits on.
 func TestStatusDBColumn(t *testing.T) {
 	source := Worktree{Root: "/main", EnvFiles: []envfile.File{
 		{Path: "/main/.env", Vars: map[string]string{"DATABASE_URL": "postgres://h/app_dev"}},
 	}}
-	live := []string{"app_dev", DBName("app_dev", Slug("feat/a"))}
+	clone := DBName("app_dev", Slug("feat/a"))
+	live := []string{"app_dev", clone}
+
+	// at builds the worktree whose .env names db. "" gives a URL with no database
+	// in it — present and non-empty, so the env half stays clean and every row
+	// below is about the database column alone.
+	at := func(db string) Worktree {
+		return Worktree{Root: "/w", EnvFiles: []envfile.File{
+			{Path: "/w/.env", Vars: map[string]string{"DATABASE_URL": "postgres://h/" + db}},
+		}}
+	}
 
 	cases := []struct {
-		name   string
-		d      Doctor
-		source Worktree
-		ref    Ref
-		want   string
+		name       string
+		d          Doctor
+		source     Worktree
+		wt         Worktree
+		ref        Ref
+		want       string
+		wantStatus string
 	}{
-		{"clone present", Doctor{Databases: live}, source, Ref{Path: "/w", Branch: "feat/a"}, "ok"},
-		{"main is the template, never a missing clone", Doctor{Databases: live, MainBranch: "main"}, source, Ref{Path: "/main", Branch: "main"}, "shared"},
-		{"clone absent", Doctor{Databases: live}, source, Ref{Path: "/w", Branch: "feat/b"}, "missing"},
-		{"postgres never asked", Doctor{}, source, Ref{Path: "/w", Branch: "feat/a"}, ""},
-		{"repo declares no database", Doctor{Databases: live}, Worktree{Root: "/main"}, Ref{Path: "/w", Branch: "feat/a"}, ""},
-		{"detached worktree never had one", Doctor{Databases: live}, source, Ref{Path: "/w"}, ""},
+		{"pointed at its own clone", Doctor{Databases: live}, source, at(clone), Ref{Path: "/w", Branch: "feat/a"}, "ok", "ok"},
+		{"clone exists, .env still names the shared database", Doctor{Databases: live}, source, at("app_dev"), Ref{Path: "/w", Branch: "feat/a"}, "shared", "fail"},
+		{"clone exists, .env names nothing", Doctor{Databases: live}, source, at(""), Ref{Path: "/w", Branch: "feat/a"}, "adrift", "warn"},
+		{"main is the template, never a missing clone", Doctor{Databases: live, MainBranch: "main"}, source, at("app_dev"), Ref{Path: "/main", Branch: "main"}, "main", "ok"},
+		{"clone absent", Doctor{Databases: live}, source, at("app_dev"), Ref{Path: "/w", Branch: "feat/b"}, "missing", "warn"},
+		{"postgres never asked", Doctor{}, source, at(""), Ref{Path: "/w", Branch: "feat/a"}, "", "ok"},
+		{"repo declares no database", Doctor{Databases: live}, Worktree{Root: "/main"}, at(""), Ref{Path: "/w", Branch: "feat/a"}, "", "ok"},
+		{"detached worktree never had one", Doctor{Databases: live}, source, at(""), Ref{Path: "/w"}, "", "ok"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := c.d.Status(Worktree{Root: "/w"}, c.ref, c.source).DB; got != c.want {
-				t.Errorf("DB = %q, want %q", got, c.want)
+			got := c.d.Status(c.wt, c.ref, c.source)
+			if got.DB != c.want {
+				t.Errorf("DB = %q, want %q", got.DB, c.want)
+			}
+			if got.Status != c.wantStatus {
+				t.Errorf("Status = %q, want %q — this is the field `ls --json` exits on", got.Status, c.wantStatus)
+			}
+		})
+	}
+}
+
+// TestFleet: one bad worktree is a bad fleet, and a fleet nobody could ask
+// about is not a healthy one.
+func TestFleet(t *testing.T) {
+	cases := []struct {
+		name string
+		rows []Status
+		want string
+	}{
+		{"all clear", []Status{{Status: "ok"}, {Status: "ok"}}, "ok"},
+		{"one failure fails the fleet", []Status{{Status: "ok"}, {Status: "fail"}}, "fail"},
+		{"a warning warns", []Status{{Status: "ok"}, {Status: "warn"}}, "warn"},
+		{"a known problem outranks an unknown one", []Status{{Status: "skip"}, {Status: "warn"}}, "warn"},
+		{"nobody could be asked is not ok", []Status{{Status: "ok"}, {Status: "skip"}}, "skip"},
+		{"an empty fleet is vacuously fine", nil, "ok"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Fleet(c.rows); got != c.want {
+				t.Errorf("Fleet = %q, want %q", got, c.want)
 			}
 		})
 	}

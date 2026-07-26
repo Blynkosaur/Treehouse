@@ -29,6 +29,44 @@ type DBState struct {
 	Main  bool   // this IS the main checkout
 }
 
+// The database states a worktree can be in, in one word each. They are the
+// fleet table's DB column and the subject of CheckDB's sentences — one
+// vocabulary, so the glance view and the report cannot disagree about which
+// state a worktree is in. `shared` in particular is a FAILURE, not a value that
+// happens to mention the template.
+const (
+	dbMain     = "main"     // this IS the main checkout: the template is its database
+	dbUnusable = "unusable" // the template's name is one Postgres cannot hold — FAIL
+	dbMissing  = "missing"  // no clone for this worktree yet
+	dbOK       = "ok"       // .env targets this worktree's own clone
+	dbShared   = "shared"   // the clone exists and .env still names the TEMPLATE — FAIL
+	dbAdrift   = "adrift"   // the clone exists and .env names something else, or nothing
+)
+
+// DBWord is this worktree's database state in one word. It exists so the fleet
+// table and the doctor report are two renderings of one switch rather than two
+// switches that agree today: `th ls` used to answer clone-exists only, which
+// made a worktree pointed at the SHARED database read `db: ok` in the glance
+// view while `th doctor` called the same state a failure and exited 2.
+func DBWord(s DBState) string {
+	switch {
+	case s.Plan.Bad:
+		return dbUnusable
+	case s.Main:
+		return dbMain
+	case s.Plan.Skip != "":
+		return skip
+	case !s.Plan.Exists:
+		return dbMissing
+	case s.EnvDB == s.Plan.Name:
+		return dbOK
+	case s.EnvDB == s.Plan.Template:
+		return dbShared
+	default:
+		return dbAdrift
+	}
+}
+
 // CheckDB reports whether this worktree has its own database and is pointed at
 // it. The fail tier exists for exactly one case, and it is A2's whole point: a
 // clone was created but .env still names the SHARED database. Nothing about
@@ -38,39 +76,38 @@ type DBState struct {
 // working one until somebody else's branch breaks.
 func (d Doctor) CheckDB(s DBState) Check {
 	c := Check{Name: "db"}
-	switch {
-	case s.Plan.Bad:
+	switch DBWord(s) {
+	case dbUnusable:
 		// Ahead of the main case on purpose: an unusable template name is a fact
 		// about the REPO, and it is just as true standing in main. Reporting main
 		// as fine would hide the reason every other worktree gets no clone.
 		c.Status, c.Detail = "fail", s.Plan.Skip
 		c.Fix = "rename the database, or point DATABASE_URL at a name Postgres can hold"
-	case s.Main:
+	case dbMain:
 		// Main legitimately talks to the template — it is not a worktree that
 		// should have a clone, and reporting it as one would train people to
 		// ignore this row.
 		c.Status, c.Detail = "ok", "the main checkout, using the shared database "+s.Plan.Template
-	case s.Plan.Skip != "":
+	case skip:
 		c.Status, c.Detail = skip, s.Plan.Skip
-	case !s.Plan.Exists:
+	case dbMissing:
 		c.Status = "warn"
 		c.Detail = fmt.Sprintf("no database clone for this worktree (want %s)", s.Plan.Name)
 		c.Fix = "th hydrate"
-	case s.EnvDB == s.Plan.Name:
+	case dbOK:
 		c.Status, c.Detail = "ok", ".env targets this worktree's own clone "+s.Plan.Name
-	case s.EnvDB == s.Plan.Template:
+	case dbShared:
 		c.Status = "fail"
 		c.Detail = fmt.Sprintf(".env still targets the SHARED database %s while this worktree's clone %s exists — a migration here hits every other worktree",
 			s.Plan.Template, s.Plan.Name)
 		c.Fix = "th hydrate"
-	case s.EnvDB == "":
-		c.Status = "warn"
-		c.Detail = fmt.Sprintf("clone %s exists but this worktree's .env names no database", s.Plan.Name)
-		c.Fix = "th hydrate"
-	default:
-		c.Status = "warn"
+	default: // dbAdrift — one word, but two sentences worth telling apart
+		c.Status, c.Fix = "warn", "th hydrate"
+		if s.EnvDB == "" {
+			c.Detail = fmt.Sprintf("clone %s exists but this worktree's .env names no database", s.Plan.Name)
+			break
+		}
 		c.Detail = fmt.Sprintf(".env targets %s, not this worktree's clone %s", s.EnvDB, s.Plan.Name)
-		c.Fix = "th hydrate"
 	}
 	return c
 }

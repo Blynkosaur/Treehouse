@@ -2,7 +2,6 @@ package check
 
 import (
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 )
@@ -13,25 +12,45 @@ import (
 type Status struct {
 	Path   string `json:"path"`
 	Branch string `json:"branch"`
-	Env    string `json:"env"` // ok | warn | fail
 
-	// DB is clone-exists or clone-missing and NOTHING else:
-	// ok | missing | shared | "". Empty means the question wasn't asked — no
-	// database in this repo, or Postgres wasn't reachable — and "shared" is the
-	// main checkout, which is the template rather than a worktree with a clone.
-	// Whether .env is actually pointed at the clone is CheckDB's job, because
-	// answering it needs this worktree's env read, and the fleet view must stay
-	// one git round trip per row.
+	// Status is this row's whole verdict — Verdict over the same findings and
+	// checks `th doctor` folds, so `th ls --json` and `th doctor --json` can
+	// never call one worktree ok and fail. Env is the env half on its own,
+	// because the table has a column for it.
+	Status string `json:"status"` // ok | warn | fail | skip
+	Env    string `json:"env"`    // ok | warn | fail
+
+	// DB is DBWord: main | ok | missing | shared | adrift | unusable | skip, or
+	// "" when the question was never asked because this repo declares no
+	// database at all. It is NOT clone-exists-only any more — `shared` is a
+	// worktree whose clone exists while its .env still names the template, and
+	// it is a failure here exactly as it is in doctor's report.
 	DB string `json:"db,omitempty"`
-
-	// Migrations is filled only by `th doctor --db`. Running a project's
-	// migration-status command is seconds of somebody else's tooling per
-	// worktree, and `th ls` is a glance — it must never pay that.
-	Migrations string `json:"migrations,omitempty"` // pending | applied | unknown | ""
 
 	Behind  int  `json:"behind"` // commits in main this branch doesn't have
 	Dirty   bool `json:"dirty"`
 	Current bool `json:"current"` // the worktree the human is standing in
+}
+
+// Fleet folds every row into the one word `th ls` prints and exits on. Same
+// tiers as Verdict, which is where each row's own word came from: a known
+// problem outranks an unknown one, so warn beats skip, and skip still beats ok
+// because "nobody asked" is not "verified fine".
+func Fleet(rows []Status) string {
+	s := "ok"
+	for _, r := range rows {
+		switch r.Status {
+		case "fail":
+			return "fail"
+		case "warn":
+			s = "warn"
+		case skip:
+			if s == "ok" {
+				s = skip
+			}
+		}
+	}
+	return s
 }
 
 // Status folds one worktree into one row. It asks git nothing and touches no
@@ -39,29 +58,38 @@ type Status struct {
 // cmd/ls.go is the point: the TUI is a renderer over these, not a second
 // implementation of them.
 func (d Doctor) Status(w Worktree, ref Ref, source Worktree) Status {
+	findings := d.CheckEnv(w, source)
 	s := Status{
 		Path:   ref.Path,
 		Branch: ref.Branch,
-		Env:    EnvStatus(d.CheckEnv(w, source)),
+		Env:    EnvStatus(findings),
 		Behind: ref.Behind,
 		Dirty:  ref.Dirty,
 	}
+
 	// One pg.Databases call serves the whole fleet — cmd makes it once and hands
 	// the names down. A per-worktree subprocess here would put a psql round trip
 	// behind every row of a table that exists to be glanced at.
-	if template := EnvDB(source); d.Databases != nil && template != "" && ref.Branch != "" {
-		switch {
-		case ref.Branch == d.MainBranch:
-			// Main is the template, not a worktree missing a clone. A branch can
-			// only be checked out in one worktree, so this identifies it exactly.
-			// Reporting it "missing" would train people to ignore the column.
-			s.DB = "shared"
-		case slices.Contains(d.Databases, DBName(template, Slug(ref.Branch))):
-			s.DB = "ok"
-		default:
-			s.DB = "missing"
+	//
+	// The env read this row already paid for is what makes the FULL db question
+	// affordable here: Row walked the worktree to compare its .env keys, so
+	// asking that same map which database it names costs one lookup, not a round
+	// trip. That is why the column can be CheckDB's answer rather than
+	// clone-exists.
+	var checks []Check
+	if template := EnvDB(source); template != "" && ref.Branch != "" && d.Databases != nil {
+		state := DBState{
+			Plan:  d.PlanDB(DBInput{Template: template, Existing: d.Databases, Slug: Slug(ref.Branch)}),
+			EnvDB: EnvDB(w),
+			// A branch can only be checked out in one worktree, so this identifies
+			// the main checkout exactly — and main is the template rather than a
+			// worktree missing a clone.
+			Main: ref.Branch == d.MainBranch,
 		}
+		s.DB = DBWord(state)
+		checks = append(checks, d.CheckDB(state))
 	}
+	s.Status = Verdict(findings, checks)
 
 	if s.Branch == "" {
 		s.Branch = "(detached)"
