@@ -111,7 +111,7 @@ func dropClone(fleet []check.Ref, gone *check.Ref, mainRoot string) {
 			live = append(live, ref)
 		}
 	}
-	drops, err := planGC(live, mainRoot)
+	drops, _, err := planGC(live, mainRoot)
 	if err != nil {
 		return // already reported; the worktree is gone either way
 	}

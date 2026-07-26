@@ -44,7 +44,7 @@ func runGC(cmd *cobra.Command, args []string) error {
 		return errors.New("no worktrees found")
 	}
 
-	drops, err := planGC(refs, refs[0].Path)
+	drops, asked, err := planGC(refs, refs[0].Path)
 	if err != nil {
 		return err
 	}
@@ -52,17 +52,28 @@ func runGC(cmd *cobra.Command, args []string) error {
 		if drops == nil {
 			drops = []check.DBDrop{}
 		}
+		// "skip" is not a synonym for "ok" — the same distinction check.Check
+		// draws. An empty drop list because Postgres could not be asked is not the
+		// answer "there is nothing to collect", and a consumer told otherwise
+		// concludes the cluster is clean when nobody looked.
+		status := "ok"
+		if !asked {
+			status = "skip"
+		}
 		if err := printJSON(struct {
 			Schema int            `json:"schema"`
 			Root   string         `json:"root"`
 			Status string         `json:"status"`
 			Drops  []check.DBDrop `json:"drops"`
-		}{2, refs[0].Path, "ok", drops}); err != nil {
+		}{2, refs[0].Path, status, drops}); err != nil {
 			return err
 		}
 		if !gcYes {
 			return nil // listing is the whole answer; there is no prompt to answer
 		}
+	}
+	if !asked {
+		return nil // planGC already said why; claiming "nothing to collect" would contradict it
 	}
 	if len(drops) == 0 {
 		sayln("nothing to collect — every treehouse clone still has a worktree")
@@ -89,10 +100,14 @@ func runGC(cmd *cobra.Command, args []string) error {
 // planGC builds the drop list for the repo whose main checkout is mainRoot,
 // against fleet as the live set. Shared with `th rm`, which passes a fleet the
 // worktree it just removed is no longer in.
-func planGC(fleet []check.Ref, mainRoot string) ([]check.DBDrop, error) {
+//
+// asked is false when Postgres could not be reached at all. It is returned
+// rather than folded into the empty list because the two are different answers:
+// "there is nothing to collect" and "nobody looked".
+func planGC(fleet []check.Ref, mainRoot string) (drops []check.DBDrop, asked bool, err error) {
 	source, err := check.Discover(mainRoot)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if cfg, err := config.Load(mainRoot); err == nil {
 		pg.Use(cfg.Database.Psql)
@@ -102,7 +117,7 @@ func planGC(fleet []check.Ref, mainRoot string) ([]check.DBDrop, error) {
 		// Unreachable Postgres is a report line, not a failure: `th rm` calls this
 		// after the worktree is already gone, and there is nothing to roll back.
 		say("• db: skipped (postgres is not reachable: %s)\n", oneLine(err))
-		return nil, nil
+		return nil, false, nil
 	}
 	return check.Doctor{}.PlanGC(check.GCInput{
 		Owned:    owned,
@@ -110,7 +125,7 @@ func planGC(fleet []check.Ref, mainRoot string) ([]check.DBDrop, error) {
 		Template: check.EnvDB(source),
 		MainRoot: mainRoot,
 		InUse:    inUse(fleet),
-	}), nil
+	}), true, nil
 }
 
 // inUse is the database each live worktree's .env actually names — the liveness
