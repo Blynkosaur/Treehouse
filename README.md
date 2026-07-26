@@ -31,7 +31,7 @@ present, ports and compose project of their own — instead of born broken.
 | `th new <branch>` | Cuts a worktree beside the main checkout and runs the full hydrate pipeline, then prints a doctor report. `--from <ref>`, `--path <dir>`, `--skip-deps`. |
 | `th hydrate` | Fills this worktree's `.env` files from the main checkout, provisions heavy dep dirs, clones this branch's database, then writes derived values. `--dry`, `--skip-deps`, `--force-db`. |
 | `th doctor` | Reports env drift per service, plus whether this worktree has its own database and is pointed at it. `--db` adds migration and seed state. `--ls` table, `--json`, `--quiet`. |
-| `th ls` | One table: every worktree × branch × env × db × behind-main × dirty. `--json`. |
+| `th ls` | One table: every worktree × branch × env × db × behind-main × dirty. Exits 2 on a FAIL fleet, like `doctor`. `--json`. |
 | `th triage -- <cmd>` | Runs the command, streams it, and afterwards says whether the failure was the environment or the code. `--stdin`, `--hook`. |
 | `th hook session` | Claude Code `SessionStart`: hands the agent this worktree's env and database state. |
 | `th rm <branch>` | Removes a worktree, its branch, and its database clone. Refuses dirty or unpushed work without `--force`, and always refuses the worktree you're standing in. |
@@ -78,16 +78,19 @@ remain the outputs to script against.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | healthy, or warnings only |
+| 0 | healthy, warnings only, or checks that could not be run |
 | 1 | treehouse itself failed (usage, git, IO) |
-| 2 | a curated required key is missing or empty, or this worktree's `.env` targets the shared database while its own clone exists |
+| 2 | a FAIL finding: a curated required key missing or empty, a `.env` targeting the shared database while its own clone exists, a database name Postgres cannot hold, or a `treehouse.toml` that will not parse |
 
-One documented exception: `th triage -- <cmd>` passes the **wrapped command's**
-exit code through verbatim, because a wrapper that changes it is a wrapper you
-cannot put in front of anything. See [Triage](#triage-environment-or-code).
+`th doctor` and `th ls` both answer this way, so an agent can gate on the fleet
+without parsing a table. Two documented exceptions, both in
+[Triage](#triage-environment-or-code): `th triage -- <cmd>` passes the **wrapped
+command's** code through verbatim, because a wrapper that changes it is a
+wrapper you cannot put in front of anything; and `th triage --hook` always exits
+0, because it runs after every Bash call.
 
-Requirements inferred from `.env.example` are warnings. Failures come only from a
-human-curated list:
+Requirements inferred from `.env.example` are warnings. *Env* failures come only
+from a human-curated list:
 
 ```toml
 # treehouse.toml, committed
@@ -96,9 +99,20 @@ required = ["DATABASE_URL"]
 ```
 
 `--json` emits an object, never a bare array:
-`{"schema": 2, "root": …, "status": ok|warn|fail, "findings": […], "checks": […]}`.
-`findings` is env drift per service; `checks` is the database, migration and seed
-rows. Key off `status` — it folds both.
+`{"schema": 2, "root": …, "status": ok|warn|fail|skip, "findings": […], "checks": […]}`.
+`findings` is env drift per service; `checks` is the config, database, migration
+and seed rows. `th ls --json` is the same envelope with `worktrees` in place of
+`findings`, and every row carries its own `status` computed the same way — the
+two commands cannot call one worktree ok and fail.
+
+**`skip` is not a synonym for ok, and it never satisfies a green.** It means the
+question could not be answered here: Postgres was unreachable, no
+`[migrations] status` command is configured, this worktree is detached. A report
+whose worst word is `skip` says `skip`, not `ok`, because "nobody asked" and
+"verified fine" are the two answers an agent must never confuse. `th doctor --db`
+against a dead cluster emits `skip` rows *for the migration and seed checks the
+flag asked for* rather than dropping them — silence is the worst possible
+answer. `skip` still exits 0: nothing is known to be broken.
 
 ## A database per worktree
 
@@ -132,17 +146,27 @@ clones whose worktree is gone:
 drop 1 database(s)? [y/N]
 ```
 
-**Your database name has to be a bare identifier.** Every name treehouse
-interpolates into SQL is checked against `^[a-z_][a-z0-9_]*$` and refused
-otherwise — treehouse refuses rather than escapes, because escaping is where
-injection bugs live. The cost is that legal-but-quoted names like `app-db` or
-`APPDB` are refused too: such a repo gets **no clones at all**, permanently, with
-one skip line saying so. Rename the database or stay on the shared one.
+**Identifiers are quoted, not refused.** Every database name treehouse puts in
+SQL is wrapped in double quotes with any embedded `"` doubled — the well-defined
+Postgres rule — so `app-db`, `APPDB` and a name with a space all work. Names go
+to `psql` as argv or on stdin, never through a shell.
 
-**`th ls` only reports whether the clone exists.** A worktree whose clone exists
-but whose `.env` still names the *shared* database shows `db: ok` in the fleet
-table, while `th doctor` calls that same state a failure and exits 2. Trust
-`doctor` over the glance view until this is reconciled.
+A name is still refused when quoting cannot rescue it: empty, longer
+than 63 bytes (Postgres truncates silently, and two branches truncated alike
+would share one database), or carrying a NUL, a newline or a carriage return.
+Those are a **FAIL-level `db` check with a fix line**, not a quiet skip — a repo
+that wants clones and will never get one has to hear about it.
+
+*(Earlier versions refused anything outside `^[a-z_][a-z0-9_]*$`, so a repo whose
+database was called `app-db` got no clones at all, permanently. That is fixed.)*
+
+**`th ls` reports the same database state `th doctor` does.** The column answers
+`main` (the checkout that legitimately uses the template), `ok`, `missing`,
+`shared`, `adrift`, `unusable` or `skip` — not just clone-exists. `shared` is a
+worktree whose clone exists while its `.env` still names the template, and it is
+red here and a FAIL in the fleet verdict, exactly as in doctor's report. Nothing
+about that state looks wrong from inside the app, and it is the one state in the
+table that costs data.
 
 ## Migrations and seeds
 
@@ -250,6 +274,18 @@ needs = "service"                     # env | db | migration | service
 `needs` names the doctor fact that must agree before triage says `environment`.
 Entries merge by name, like `[[deps]]` and `[[seed]]`: reuse a built-in's name
 to replace it, use a new one to add.
+
+### When `treehouse.toml` will not parse
+
+Every command degrades to the built-in defaults and keeps working — the file is
+optional, so a broken one must not be worse than an absent one. It is also a
+**FAIL-level `config` check** naming the file and the parse error, in `doctor`,
+in `ls` and in both JSON outputs, because the file is nothing but human judgment
+(required keys, seeds, signatures) and silently not applying it is how a
+`required = [...]` list stops being enforced without anybody noticing. `th seed`
+is the one exception: it cannot work without the file at all, so it errors.
+
+Neither hook ever fails over it. `th triage --hook` and `th hook session` exit 0.
 
 ## Claude Code hooks (UNVERIFIED — read this before pasting)
 
