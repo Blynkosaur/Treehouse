@@ -221,14 +221,13 @@ func resolveApp(source check.Worktree, sourceRoot string) string {
 // samePath compares paths through symlinks: git reports /private/var where
 // os.Getwd may report /var. Getting this wrong would put a worktree in its own
 // port registry, and its ports would move on every hydrate.
-func samePath(a, b string) bool {
-	resolve := func(p string) string {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return r
-		}
-		return p
+func samePath(a, b string) bool { return resolve(a) == resolve(b) }
+
+func resolve(path string) string {
+	if r, err := filepath.EvalSymlinks(path); err == nil {
+		return r
 	}
-	return resolve(a) == resolve(b)
+	return path
 }
 
 // nKeys pluralizes a key count for human output ("1 key", "3 keys").
