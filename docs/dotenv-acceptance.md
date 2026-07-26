@@ -62,7 +62,7 @@ rewrite, so it writes to a temp file and renames — `Append` can only damage th
 | 1 | Existing key rewritten in place; comments, order and other keys untouched | `TestSet/overwrite_preserves_comments_and_key_order` |
 | 2 | **Every** duplicate declaration is rewritten, not just the last (which one wins is the loader's business) | `TestSet/every_duplicate_is_rewritten` |
 | 3 | `# PORT=1` is not a match — the rule is `Parse`'s, character for character | `TestSet/commented-out_key_is_not_a_match` |
-| 4 | `export PORT=3000` is not a match either: `Parse` reads that key as `export PORT` | `TestSet/export_prefix_is_not_a_match_(Parse_reads_it_as_'export_PORT')` |
+| 4 | `export PORT=3000` **is** a match — `Parse` reads it as `PORT`, so `Set` rewrites the line in place and keeps it exported (appending a duplicate would leave the app on the old value while doctor read the new one) | `TestSet/export_prefix_is_rewritten_in_place,_and_stays_exported` |
 | 5 | New keys appended sorted, with **no** `Marker` block (a set is an override, not a hydrate) | `TestSet/absent_file_is_created` |
 | 6 | Absent file created 0644; existing file's mode preserved | `TestSet/absent_file_is_created`, `TestSetPreservesMode` |
 | 7 | No trailing newline and CRLF both survive; output always ends in `\n` | `TestSet/no_trailing_newline`, `TestSet/CRLF_line_endings_survive` |

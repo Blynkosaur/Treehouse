@@ -40,6 +40,18 @@ var testItems = []envVariableItem{
 		input: "this is not a pair\nFOO=bar",
 		want:  map[string]string{"FOO": "bar"},
 	},
+	{
+		// Parse's half of the export rule. Set matches on the same function, so
+		// the two cannot drift apart and disagree about what a line declares.
+		name:  "export prefix declares the bare key",
+		input: "export FOO=bar\nexport  SIX = seven \n",
+		want:  map[string]string{"FOO": "bar", "SIX": "seven"},
+	},
+	{
+		name:  "export is only stripped as a prefix word",
+		input: "exported=1\nexport=2",
+		want:  map[string]string{"exported": "1", "export": "2"},
+	},
 }
 
 func TestParse(t *testing.T) {
@@ -142,10 +154,24 @@ func TestSet(t *testing.T) {
 			want:    "# PORT=1\nPORT=3001\n",
 		},
 		{
-			name:    "export prefix is not a match (Parse reads it as 'export PORT')",
+			// Appending instead of rewriting here is what would leave an app on
+			// the shared database while doctor read the appended line and agreed.
+			name:    "export prefix is rewritten in place, and stays exported",
 			initial: "export PORT=3000\n",
 			vars:    map[string]string{"PORT": "3001"},
-			want:    "export PORT=3000\nPORT=3001\n",
+			want:    "export PORT=3001\n",
+		},
+		{
+			name:    "export with extra spacing",
+			initial: "export  PORT = 3000 \n",
+			vars:    map[string]string{"PORT": "3001"},
+			want:    "export PORT=3001\n",
+		},
+		{
+			name:    "a key that merely starts with export is untouched",
+			initial: "exported=1\n",
+			vars:    map[string]string{"PORT": "3001"},
+			want:    "exported=1\nPORT=3001\n",
 		},
 		{
 			name:    "no trailing newline",

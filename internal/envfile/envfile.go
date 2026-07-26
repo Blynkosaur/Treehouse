@@ -44,8 +44,12 @@ func Parse(envContent string) (map[string]string, error) {
 // Set matches keys with it. One function rather than two copies: a Set that
 // matched keys Parse doesn't read (or vice versa) would edit a line nobody
 // loads. A leading BOM is noise an editor left behind, not part of the key.
+// bom is the byte-order mark an editor leaves at the head of a file \u2014 noise,
+// never part of the first key.
+const bom = "\ufeff"
+
 func splitLine(line string) (key, val string, ok bool) {
-	line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
+	line = strings.TrimSpace(strings.TrimPrefix(line, bom))
 	if line == "" || strings.HasPrefix(line, "#") {
 		return "", "", false
 	}
@@ -53,7 +57,19 @@ func splitLine(line string) (key, val string, ok bool) {
 	if !found {
 		return "", "", false
 	}
-	return strings.TrimSpace(k), unquote(strings.TrimSpace(v)), true
+	// `export FOO=bar` declares FOO. Reading the key as "export FOO" made Set
+	// append a duplicate instead of rewriting the line — cosmetic for a port,
+	// silent corruption for DATABASE_URL: the app keeps reading the original
+	// line and stays on the shared database, while doctor reads the appended
+	// one back and reports green.
+	//
+	// ponytail: the prefix is matched with a single space, as a shell writes it.
+	// "export\tFOO" stays unrecognised; widen when a real file hits it.
+	k = strings.TrimSpace(k)
+	if rest, cut := strings.CutPrefix(k, "export "); cut {
+		k = strings.TrimSpace(rest)
+	}
+	return k, unquote(strings.TrimSpace(v)), true
 }
 
 // unquote reverses quote: exactly ONE surrounding pair of matching quotes, plus
@@ -158,6 +174,12 @@ func Set(path string, vars map[string]string) error {
 		// property of the loader, and we don't get to assume which loader.
 		key := lineKey(text)
 		written[key] = true
+		// The rewrite rebuilds the line from the key, so the prefix has to be put
+		// back: dropping it un-exports the variable for every shell that sources
+		// the file, which is a value change disguised as a formatting one.
+		if strings.HasPrefix(strings.TrimSpace(strings.TrimPrefix(text, bom)), "export ") {
+			b.WriteString("export ")
+		}
 		b.WriteString(key + "=" + quote(val))
 		if cr {
 			b.WriteString("\r")
@@ -195,9 +217,9 @@ func Set(path string, vars map[string]string) error {
 	return os.Rename(tmp.Name(), path)
 }
 
-// lineKey returns the key a line declares, or "" for none. Consequence of
-// sharing splitLine with Parse: "export PORT=3000" has key "export PORT" here
-// too, so Set(PORT) leaves it alone.
+// lineKey returns the key a line declares, or "" for none. Sharing splitLine
+// with Parse is the whole invariant — the match rule is Parse's rule, character
+// for character, so Set can never edit a line nobody loads (or miss one).
 func lineKey(line string) string {
 	key, _, _ := splitLine(line)
 	return key
