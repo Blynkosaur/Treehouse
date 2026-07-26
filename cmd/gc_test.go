@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,4 +50,33 @@ func TestGCWithoutAReachableCluster(t *testing.T) {
 			t.Errorf("claimed every clone still has a worktree right after saying it could not ask:\n%s", out)
 		}
 	})
+}
+
+// TestKeepReason is ITEM 6. collect used to read `err == nil && len(sessions) > 0`,
+// which turned the live-connection guard OFF exactly when the cluster was
+// misbehaving — the one moment it is least safe to assume nobody is connected.
+// gc is the only command in treehouse that destroys data; both belts stay on.
+func TestKeepReason(t *testing.T) {
+	cases := []struct {
+		name     string
+		sessions []string
+		err      error
+		wantKeep bool
+	}{
+		{"idle and answered: this one may go", nil, nil, false},
+		{"somebody is connected", []string{"123  app  local"}, nil, true},
+		{"the cluster could not be asked", nil, errors.New("psql: connection refused"), true},
+		{"asked and errored is not asked and empty", []string{}, errors.New("boom"), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			why := keepReason(c.sessions, c.err)
+			if (why != "") != c.wantKeep {
+				t.Errorf("keepReason = %q, wantKeep %v", why, c.wantKeep)
+			}
+			if c.wantKeep && why == "" {
+				t.Error("a kept database with no reason is a database somebody has to guess about")
+			}
+		})
+	}
 }

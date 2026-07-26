@@ -148,14 +148,21 @@ func inUse(fleet []check.Ref) []string {
 	return dbs
 }
 
-// collect drops each planned database, and refuses any that still has
-// connections. Dropping out from under a running process creates exactly the
-// corpse gc exists to remove, so a live session is reported and skipped — the
-// database stays, and the next gc will offer it again.
+// collect drops each planned database, and refuses any it cannot prove is
+// idle. Dropping out from under a running process creates exactly the corpse gc
+// exists to remove, so a live session is reported and skipped — the database
+// stays, and the next gc will offer it again.
+//
+// An ERROR from pg.Sessions is the same answer, and this used to read it as
+// consent: `err == nil && len(sessions) > 0` meant the live-connection guard
+// switched itself off exactly when the cluster was misbehaving. gc is the only
+// command that destroys data. Both belts stay on, and "I could not ask" is
+// never "nobody is connected".
 func collect(drops []check.DBDrop) {
 	for _, d := range drops {
-		if sessions, err := pg.Sessions(d.Name); err == nil && len(sessions) > 0 {
-			say("• %s: kept — %d connection(s) still open\n", d.Name, len(sessions))
+		sessions, err := pg.Sessions(d.Name)
+		if why := keepReason(sessions, err); why != "" {
+			say("• %s: kept — %s\n", d.Name, why)
 			for _, s := range sessions {
 				say("    %s\n", s)
 			}
@@ -167,6 +174,20 @@ func collect(drops []check.DBDrop) {
 		}
 		say("✓ dropped %s (was %s)\n", d.Name, d.Branch)
 	}
+}
+
+// keepReason says why a clone must not be dropped, or "" when it may be. Split
+// out from collect for one reason: it is the last thing standing between a
+// misbehaving cluster and somebody's data, and a switch that can only be
+// exercised against a live Postgres is a switch nobody exercises.
+func keepReason(sessions []string, err error) string {
+	switch {
+	case err != nil:
+		return "could not check for open connections (" + oneLine(err) + ")"
+	case len(sessions) > 0:
+		return fmt.Sprintf("%d connection(s) still open", len(sessions))
+	}
+	return ""
 }
 
 // confirm asks before a destructive operation. A prompt nobody can answer — no
