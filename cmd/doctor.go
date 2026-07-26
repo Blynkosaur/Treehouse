@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -57,9 +58,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	case quiet:
 	case lsMode:
 		printTable(findings, root)
-		printChecks(checks)
+		printChecks(os.Stdout, checks)
 	default:
-		printReport(findings, checks, root)
+		printReport(os.Stdout, findings, checks, root)
 	}
 	return verdict(findings, checks)
 }
@@ -257,11 +258,16 @@ func printFindingsJSON(findings []check.Finding, checks []check.Check, root stri
 
 // printChecks renders the sibling list under the env report, one line each,
 // with the fix indented beneath the ones that have one.
-func printChecks(checks []check.Check) {
+//
+// It and printReport take a writer rather than printing, for one reason: the
+// TUI's drill-in must show what `th doctor` shows, and the cheapest way to
+// guarantee that forever is to render into a buffer with the same code. A
+// second narrative renderer would drift the first time either changed.
+func printChecks(w io.Writer, checks []check.Check) {
 	for _, c := range checks {
-		fmt.Printf("%s %s: %s\n", checkMark(c.Status), c.Name, c.Detail)
+		fmt.Fprintf(w, "%s %s: %s\n", checkMark(c.Status), c.Name, c.Detail)
 		if c.Fix != "" {
-			fmt.Printf("    fix: %s\n", c.Fix)
+			fmt.Fprintf(w, "    fix: %s\n", c.Fix)
 		}
 	}
 }
@@ -301,38 +307,38 @@ func relDir(root, dir string) string {
 // checks print between the per-service lines and the summary, because the
 // summary is about the whole worktree — "all clear" printed above a failing
 // database row would be a lie with a line number.
-func printReport(findings []check.Finding, checks []check.Check, root string) {
+func printReport(w io.Writer, findings []check.Finding, checks []check.Check, root string) {
 	problems, failed := 0, 0
 	for _, f := range findings {
 		rel := relDir(root, f.Dir)
 		switch {
 		case f.NoEnv:
 			problems++
-			fmt.Printf("✗ %s: .env missing entirely (%d keys expected)\n", rel, f.Keys)
+			fmt.Fprintf(w, "✗ %s: .env missing entirely (%d keys expected)\n", rel, f.Keys)
 		case f.Drifted():
 			problems++
 			if len(f.Missing) > 0 {
-				fmt.Printf("! %s: %d expected keys missing from .env:\n", rel, len(f.Missing))
+				fmt.Fprintf(w, "! %s: %d expected keys missing from .env:\n", rel, len(f.Missing))
 				for _, k := range f.Missing {
-					fmt.Printf("    %s\n", k)
+					fmt.Fprintf(w, "    %s\n", k)
 				}
 			}
 			if len(f.Empty) > 0 {
-				fmt.Printf("! %s: %d keys present but empty:\n", rel, len(f.Empty))
+				fmt.Fprintf(w, "! %s: %d keys present but empty:\n", rel, len(f.Empty))
 				for _, k := range f.Empty {
-					fmt.Printf("    %s\n", k)
+					fmt.Fprintf(w, "    %s\n", k)
 				}
 			}
 		default:
-			fmt.Printf("✓ %s: .env has all %d expected keys\n", rel, f.Keys)
+			fmt.Fprintf(w, "✓ %s: .env has all %d expected keys\n", rel, f.Keys)
 		}
 		if f.Fails() {
 			failed++
-			fmt.Printf("    required by treehouse.toml: %s\n", strings.Join(f.Failed, ", "))
+			fmt.Fprintf(w, "    required by treehouse.toml: %s\n", strings.Join(f.Failed, ", "))
 		}
 	}
 
-	printChecks(checks)
+	printChecks(w, checks)
 	for _, c := range checks {
 		switch c.Status {
 		case "fail":
@@ -345,11 +351,11 @@ func printReport(findings []check.Finding, checks []check.Check, root string) {
 
 	switch {
 	case problems == 0:
-		fmt.Println("\nall clear")
+		fmt.Fprintln(w, "\nall clear")
 	case failed > 0:
-		fmt.Printf("\n%d problem(s), %d of them failures\n", problems, failed)
+		fmt.Fprintf(w, "\n%d problem(s), %d of them failures\n", problems, failed)
 	default:
-		fmt.Printf("\n%d problem(s) (inferred requirements → warnings only)\n", problems)
+		fmt.Fprintf(w, "\n%d problem(s) (inferred requirements → warnings only)\n", problems)
 	}
 }
 

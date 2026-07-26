@@ -26,6 +26,8 @@ present, ports and compose project of their own — instead of born broken.
 
 | Command | What it does |
 | --- | --- |
+| `th` | On a terminal, opens the live dashboard. Anywhere else — a pipe, CI, an agent capturing stdout — prints this help instead. |
+| `th tui` | The dashboard, explicitly. |
 | `th new <branch>` | Cuts a worktree beside the main checkout and runs the full hydrate pipeline, then prints a doctor report. `--from <ref>`, `--path <dir>`, `--skip-deps`. |
 | `th hydrate` | Fills this worktree's `.env` files from the main checkout, provisions heavy dep dirs, clones this branch's database, then writes derived values. `--dry`, `--skip-deps`, `--force-db`. |
 | `th doctor` | Reports env drift per service, plus whether this worktree has its own database and is pointed at it. `--db` adds migration and seed state. `--ls` table, `--json`, `--quiet`. |
@@ -41,6 +43,36 @@ present, ports and compose project of their own — instead of born broken.
 Hydrate runs three phases in order — **fill canonical → provision deps → derive** —
 so a derived value never points at a broken env. Dependency failures are reported
 red but don't abort; env and git failures do.
+
+## The dashboard
+
+`th` with no arguments opens a live board of the whole fleet: one row per
+worktree, the row you're standing in marked, and a spinner in every cell no
+checker has answered for yet. Path and branch come straight from git, so they
+are on screen immediately; env, database, behind-main and dirty fill in
+independently as each worktree's checks land, rather than all at once when the
+slowest one finishes.
+
+| Key | Does |
+| --- | --- |
+| `↑` `↓` / `k` `j` | select a worktree |
+| `enter` | drill into that worktree's doctor report |
+| `esc` | back to the grid |
+| `h` | run `th hydrate` on the selected worktree, then re-check that row in place |
+| `r` | re-check the whole fleet |
+| `q` / `ctrl-c` | quit |
+
+`h` runs hydrate as a real subprocess: its output scrolls past normally, then
+the board comes back and the row it repaired flips green on its own.
+
+**The board is a renderer, not a second opinion.** Every cell is a field of
+`check.Status` — the same rows `th ls` prints — and the drill-in is literally
+`th doctor`'s report. Nothing in the TUI decides anything the CLI wouldn't.
+
+**It never hijacks a pipe.** The dashboard needs a terminal, so bare `th`
+checks for one first; without it you get the help text, exactly as before.
+Hooks, CI and agents are unaffected, and `th ls --json` / `th doctor --json`
+remain the outputs to script against.
 
 ## Exit codes
 
