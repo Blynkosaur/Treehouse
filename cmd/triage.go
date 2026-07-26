@@ -142,15 +142,30 @@ type hookPayload struct {
 // It NEVER re-runs the command. The output is already in the payload, and
 // re-running would re-run `git push`, `rm -rf`, a migration.
 func triageFromHook() error {
+	if err := hookTriage(); err != nil {
+		// stderr, and exit 0 regardless. This runs after EVERY Bash tool call, so
+		// a non-zero exit here is a claim about somebody else's command that we
+		// have no business making: 2 is PostToolUse's legacy BLOCKING shape, and 1
+		// says treehouse itself broke. Neither is true of "your payload had a
+		// field I could not read". The line still lands in `claude --debug`, which
+		// is where anyone testing a hook is looking, and it can never wedge a
+		// session or fail a call for a reason unrelated to the call.
+		fmt.Fprintf(os.Stderr, "th triage --hook: %v\n", err)
+	}
+	return nil
+}
+
+func hookTriage() error {
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return err
 	}
 	var p hookPayload
 	if err := json.Unmarshal(raw, &p); err != nil {
-		// A parse failure here means the payload shape changed under us. Saying
-		// so (visible in `claude --debug`) beats going quiet, which is
-		// indistinguishable from "no signature matched" for anyone testing it.
+		// A parse failure here means the payload shape changed under us. Saying so
+		// on stderr beats going quiet, which is indistinguishable from "no
+		// signature matched" for anyone testing it — and triageFromHook keeps it
+		// off the exit code.
 		return fmt.Errorf("reading hook payload: %w", err)
 	}
 	if p.ToolName != "Bash" {
@@ -185,20 +200,19 @@ func triageFromHook() error {
 	if err != nil {
 		return err
 	}
-	if err := emitContext("PostToolUse", strings.Join(triageLines(v), "\n")); err != nil {
-		return err
-	}
-	return triageExit(v)
+	// The verdict rides in the JSON payload and NOWHERE else. PostToolUse's
+	// protocol is stdout-JSON plus exit 0; exit 2 is the legacy blocking shape
+	// and may read as a blocked tool call. Blocking an agent's tool call because
+	// its environment looks broken is far worse than failing to hint at it.
+	return emitContext("PostToolUse", strings.Join(triageLines(v), "\n"))
 }
 
-// triageExit is the shared contract for the two non-wrapper modes: 2 when the
-// environment is the answer, 0 otherwise. Deliberately NOT a fourth code —
+// triageExit is --stdin's contract, and only --stdin's: 2 when the environment
+// is the answer, 0 otherwise. That mode is for scripts and pipes, where a
+// non-zero code is the whole useful signal. Deliberately NOT a fourth code —
 // `environment` is a worktree verdict, which is what doctor's 2 already means.
 //
-// UNVERIFIED for --hook: PostToolUse's current protocol is stdout JSON + exit 0,
-// and exit 2 is the legacy blocking shape. If an observed run shows Claude Code
-// treating this 2 as a blocked tool call, the fix is to return nil here for the
-// hook path. See the hook section of the README.
+// The hook does not use it. See triageFromHook.
 func triageExit(v check.TriageVerdict) error {
 	if v.Cause == "environment" {
 		return exitCode(2)

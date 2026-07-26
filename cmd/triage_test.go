@@ -218,8 +218,11 @@ func TestTriageHook(t *testing.T) {
 		if n := len(strings.Split(got.HookSpecificOutput.AdditionalContext, "\n")); n > 10 {
 			t.Errorf("additionalContext is %d lines; the cap is 10", n)
 		}
-		if code != 2 {
-			t.Errorf("exit %d, want 2 for an environment verdict", code)
+		// ITEM 4: the verdict rides in the payload, never in the exit code.
+		// PostToolUse is stdout-JSON + exit 0; 2 is the legacy BLOCKING shape,
+		// and blocking an agent's tool call is far worse than failing to hint.
+		if code != 0 {
+			t.Errorf("exit %d, want 0 — an `environment` verdict must not read as a blocked tool call", code)
 		}
 	})
 
@@ -295,8 +298,8 @@ func TestHookSurvivesMalformedPayloads(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, _, code := runTri(t, dir, tc.stdin, "triage", "--hook")
-			if code != 0 && code != 1 && code != 2 {
-				t.Errorf("exit %d — a hook may only ever answer 0, 1 or 2", code)
+			if code != 0 {
+				t.Errorf("exit %d — the hook may only ever answer 0; it must never fail a Bash call for a reason unrelated to it", code)
 			}
 			if out == "" {
 				return // silence is always allowed

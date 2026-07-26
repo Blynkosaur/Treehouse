@@ -214,7 +214,7 @@ It is not faked, and when the dead-service check lands it starts reaching
 | --- | --- | --- |
 | `th triage -- <cmd>` | the command's own streams, untouched; verdict on **stderr**, ≤10 lines | **the wrapped command's, verbatim** |
 | `th triage --stdin` | verdict JSON on stdout | 0, or **2** for `environment` |
-| `th triage --hook` | `hookSpecificOutput` JSON on stdout | 0, or **2** for `environment` |
+| `th triage --hook` | `hookSpecificOutput` JSON on stdout | **always 0** |
 
 The wrapper is transparent on purpose — `time`, `env` and `nice` all pass the
 code through, and `th triage -- pytest` has to keep failing a Makefile. That is
@@ -222,8 +222,18 @@ why the verdict goes to stderr: stdout belongs to the wrapped command, and a
 verdict printed into it would corrupt every pipeline. (127 if the command could
 not be started at all; 128 if it was killed by a signal.)
 
-There is no fourth exit code. `environment` is a verdict about the worktree,
-which is exactly what doctor's 2 already means.
+`--stdin` is for scripts and pipes, where a non-zero code is the useful signal;
+there is no fourth exit code, because `environment` is a verdict about the
+worktree and that is exactly what doctor's 2 already means.
+
+**`--hook` always exits 0**, and its verdict rides in the JSON payload alone.
+PostToolUse's protocol is stdout-JSON plus exit 0; exit 2 is the legacy
+*blocking* shape and may read as a blocked tool call. Blocking an agent's tool
+call because its environment looks broken is far worse than failing to hint at
+it. Nothing else can make the hook exit non-zero either — an unreadable payload,
+a broken `treehouse.toml` or a cwd that no longer exists all print one line to
+stderr (visible in `claude --debug`) and exit 0. It runs after *every* Bash call;
+it may never fail one for a reason unrelated to it.
 
 ### Your own signatures
 
@@ -311,9 +321,9 @@ claude --debug
 #    turn. The first without the second is unknown 2 above.
 ```
 
-If step 3 shows the hook firing but exit 2 being treated as a *blocked* tool
-call rather than added context, the fix is one line: `triageExit` should return
-`nil` on the hook path. The comment there says so.
+Step 3 no longer risks the blocked-tool-call failure: `--hook` exits 0
+unconditionally, so the only question left is whether `additionalContext`
+reaches the model.
 
 ## Per-worktree isolation
 
