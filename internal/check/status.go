@@ -32,12 +32,16 @@ type Status struct {
 	Current bool `json:"current"` // the worktree the human is standing in
 }
 
-// Fleet folds every row into the one word `th ls` prints and exits on. Same
-// tiers as Verdict, which is where each row's own word came from: a known
-// problem outranks an unknown one, so warn beats skip, and skip still beats ok
-// because "nobody asked" is not "verified fine".
-func Fleet(rows []Status) string {
+// Fleet folds every row, plus the repo-wide checks that belong to no single
+// worktree (a treehouse.toml nobody could parse), into the one word `th ls`
+// prints and exits on. Same tiers as Verdict, which is where each row's own
+// word came from: a known problem outranks an unknown one, so warn beats skip,
+// and skip still beats ok because "nobody asked" is not "verified fine".
+func Fleet(rows []Status, repo []Check) string {
 	s := "ok"
+	for _, c := range repo {
+		s = worse(s, c.Status)
+	}
 	for _, r := range rows {
 		s = worse(s, r.Status)
 	}

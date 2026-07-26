@@ -177,18 +177,22 @@ func TestFleet(t *testing.T) {
 	cases := []struct {
 		name string
 		rows []Status
+		repo []Check
 		want string
 	}{
-		{"all clear", []Status{{Status: "ok"}, {Status: "ok"}}, "ok"},
-		{"one failure fails the fleet", []Status{{Status: "ok"}, {Status: "fail"}}, "fail"},
-		{"a warning warns", []Status{{Status: "ok"}, {Status: "warn"}}, "warn"},
-		{"a known problem outranks an unknown one", []Status{{Status: "skip"}, {Status: "warn"}}, "warn"},
-		{"nobody could be asked is not ok", []Status{{Status: "ok"}, {Status: "skip"}}, "skip"},
-		{"an empty fleet is vacuously fine", nil, "ok"},
+		{"all clear", []Status{{Status: "ok"}, {Status: "ok"}}, nil, "ok"},
+		{"one failure fails the fleet", []Status{{Status: "ok"}, {Status: "fail"}}, nil, "fail"},
+		{"a warning warns", []Status{{Status: "ok"}, {Status: "warn"}}, nil, "warn"},
+		{"a known problem outranks an unknown one", []Status{{Status: "skip"}, {Status: "warn"}}, nil, "warn"},
+		{"nobody could be asked is not ok", []Status{{Status: "ok"}, {Status: "skip"}}, nil, "skip"},
+		{"an empty fleet is vacuously fine", nil, nil, "ok"},
+		// A treehouse.toml nobody could parse belongs to no worktree and breaks
+		// them all, so it fails a fleet whose every row is fine.
+		{"a repo-wide failure fails a healthy fleet", []Status{{Status: "ok"}}, []Check{{Name: "config", Status: "fail"}}, "fail"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := Fleet(c.rows); got != c.want {
+			if got := Fleet(c.rows, c.repo); got != c.want {
 				t.Errorf("Fleet = %q, want %q", got, c.want)
 			}
 		})

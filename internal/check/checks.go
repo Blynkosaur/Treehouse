@@ -20,6 +20,27 @@ type Check struct {
 // leaving a silent gap in the report.
 const skip = "skip"
 
+// CheckConfig reports a treehouse.toml that could not be parsed.
+//
+// FAIL rather than skip, because the file is nothing BUT human judgment —
+// which env keys are required, which seed datasets exist, how to reach psql,
+// which failure signatures this repo knows. A repo that has one is relying on
+// it, and falling back to the built-in defaults in silence is how a
+// `required = [...]` list stops being enforced without anybody finding out.
+//
+// Reported, never returned: config.Load's error must not abort a command that
+// works fine on defaults. `th triage --hook` in particular runs after EVERY
+// Bash tool call, and a hook that fails the whole session over a typo in a TOML
+// file is the worst possible behaviour for something wired into an agent loop.
+func (d Doctor) CheckConfig(path, parseErr string) Check {
+	return Check{
+		Name:   "config",
+		Status: "fail",
+		Detail: "could not parse " + path + ", so its judgment is not being applied: " + parseErr,
+		Fix:    "fix the TOML in " + path,
+	}
+}
+
 // DBState is what cmd learned about this worktree's database. Plan is PlanDB's
 // own answer, re-used rather than re-derived: doctor and hydrate must agree on
 // which clone belongs here, and they do that by asking the same planner.

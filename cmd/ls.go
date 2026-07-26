@@ -3,12 +3,12 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
-	"github.com/Blynkosaur/treehouse/internal/config"
 	"github.com/Blynkosaur/treehouse/internal/pg"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
@@ -44,9 +44,9 @@ func fleet(cwd string) ([]check.Ref, check.Worktree, check.Doctor, error) {
 	}
 	mainRoot := refs[0].Path
 	source, _ := check.Discover(mainRoot)
-	cfg, _ := config.Load(mainRoot)
+	cfg, cfgChecks := loadConfig(mainRoot)
 	pg.Use(cfg.Database.Psql)
-	d := check.Doctor{Required: cfg.Env.Required, MainBranch: refs[0].Branch}
+	d := check.Doctor{Required: cfg.Env.Required, MainBranch: refs[0].Branch, Repo: cfgChecks}
 
 	// ONE psql round trip for the whole fleet, and only when main's .env names a
 	// database at all. The column answers clone-exists / clone-missing and
@@ -99,20 +99,33 @@ func runLs(cmd *cobra.Command, args []string) error {
 			Root      string         `json:"root"`
 			Status    string         `json:"status"`
 			Worktrees []check.Status `json:"worktrees"`
-		}{2, mainRoot, check.Fleet(rows), rows}); err != nil {
+			Checks    []check.Check  `json:"checks"`
+		}{2, mainRoot, check.Fleet(rows, d.Repo), rows, repoChecks(d)}); err != nil {
 			return err
 		}
-		return fleetVerdict(rows)
+		return fleetVerdict(rows, d.Repo)
 	}
+	// Repo-wide first: a treehouse.toml nobody could parse explains every column
+	// under it, and printing it after the table reads as a footnote.
+	printChecks(os.Stdout, d.Repo)
 	printFleet(rows)
-	return fleetVerdict(rows)
+	return fleetVerdict(rows, d.Repo)
+}
+
+// repoChecks is d.Repo as [] rather than null — consumers should not have to
+// special-case the healthy shape.
+func repoChecks(d check.Doctor) []check.Check {
+	if d.Repo == nil {
+		return []check.Check{}
+	}
+	return d.Repo
 }
 
 // fleetVerdict gives `th ls` doctor's exit contract. An agent that has to parse
 // a table to find out whether the fleet is broken will eventually parse it
 // wrong; 2 means the same thing here it means everywhere else.
-func fleetVerdict(rows []check.Status) error {
-	if check.Fleet(rows) == "fail" {
+func fleetVerdict(rows []check.Status, repo []check.Check) error {
+	if check.Fleet(rows, repo) == "fail" {
 		return exitCode(2)
 	}
 	return nil

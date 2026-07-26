@@ -18,6 +18,12 @@ type Doctor struct {
 	// wasn't reachable. A live fact passed in as plain data, the same bargain
 	// DBInput.Existing makes, so nothing here has to know how to reach Postgres.
 	Databases []string
+
+	// Repo is the checks that belong to the REPOSITORY rather than to any one
+	// worktree — today only a treehouse.toml that would not parse. Carried on
+	// Doctor because it is gathered once, beside Databases, and folded into the
+	// fleet verdict rather than repeated on every row.
+	Repo []Check
 }
 
 // Finding is one directory's env-drift verdict — pure data, no presentation.

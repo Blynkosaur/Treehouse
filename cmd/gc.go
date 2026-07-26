@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
-	"github.com/Blynkosaur/treehouse/internal/config"
 	"github.com/Blynkosaur/treehouse/internal/pg"
 	"github.com/spf13/cobra"
 )
@@ -109,9 +108,13 @@ func planGC(fleet []check.Ref, mainRoot string) (drops []check.DBDrop, asked boo
 	if err != nil {
 		return nil, false, err
 	}
-	if cfg, err := config.Load(mainRoot); err == nil {
-		pg.Use(cfg.Database.Psql)
+	cfg, cfgChecks := loadConfig(mainRoot)
+	for _, c := range cfgChecks {
+		// Defaults, not an abort: gc's whole safety model is the provenance
+		// comment, which no config key touches.
+		say("✗ %s: %s\n", c.Name, c.Detail)
 	}
+	pg.Use(cfg.Database.Psql)
 	owned, err := pg.Commented()
 	if err != nil {
 		// Unreachable Postgres is a report line, not a failure: `th rm` calls this

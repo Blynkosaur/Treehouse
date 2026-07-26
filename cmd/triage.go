@@ -177,11 +177,7 @@ func triageFromHook() error {
 	if err != nil {
 		return err
 	}
-	sigs, err := signatures(root)
-	if err != nil {
-		return err
-	}
-	if sig, _ := check.MatchSignature(output, sigs); sig.Name == "" {
+	if sig, _ := check.MatchSignature(output, signatures(root)); sig.Name == "" {
 		return nil // silent, and cheap: Postgres and git were never asked
 	}
 
@@ -233,10 +229,6 @@ func verdictFor(root, output string) (check.TriageVerdict, error) {
 			return v, err
 		}
 	}
-	sigs, err := signatures(root)
-	if err != nil {
-		return v, err
-	}
 	// doctorDB is off here on purpose: triage must not run the project's own
 	// migration-status command. It is somebody else's process, and a hook that
 	// spawns one after every Bash call is a tax on every tool call.
@@ -244,23 +236,26 @@ func verdictFor(root, output string) (check.TriageVerdict, error) {
 	if err != nil {
 		return v, err
 	}
-	return check.Triage(output, findings, checks, sigs), nil
+	return check.Triage(output, findings, checks, signatures(root)), nil
 }
 
 // signatures are the built-ins extended by main's treehouse.toml, through the
 // same name-keyed Merge that [[deps]] and [[seed]] use — a repo entry with a
 // built-in's name replaces it, a new name appends.
-func signatures(root string) ([]check.Signature, error) {
+//
+// It cannot fail. It used to return config.Load's error, which `th triage
+// --hook` turned into a non-zero exit — after EVERY Bash tool call, for the
+// whole session, because of a typo in a TOML file. Degrading to the built-in
+// signatures is strictly better than that, and doctor reports the broken file
+// as a `config` check so it is still visible.
+func signatures(root string) []check.Signature {
 	mainRoot, err := check.MainWorktree(root)
 	if err != nil {
-		return check.DefaultSignatures(), nil // outside a repo: built-ins only
+		return check.DefaultSignatures() // outside a repo: built-ins only
 	}
-	cfg, err := config.Load(mainRoot)
-	if err != nil {
-		return nil, fmt.Errorf("reading treehouse.toml: %w", err)
-	}
+	cfg, _ := loadConfig(mainRoot)
 	pg.Use(cfg.Database.Psql)
-	return config.Merge(check.DefaultSignatures(), cfg.Signature, signatureName), nil
+	return config.Merge(check.DefaultSignatures(), cfg.Signature, signatureName)
 }
 
 func signatureName(s check.Signature) string { return s.Name }

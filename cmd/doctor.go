@@ -81,9 +81,10 @@ func diagnose(root string) ([]check.Finding, []check.Check, error) {
 	var d check.Doctor
 	mainRoot, gitErr := check.MainWorktree(root)
 	var cfg config.File
+	var checks []check.Check
 	if gitErr == nil {
 		source, _ = check.Discover(mainRoot)
-		cfg, _ = config.Load(mainRoot) // absent/broken config: inferred-only
+		cfg, checks = loadConfig(mainRoot)
 		d.Required = cfg.Env.Required
 		pg.Use(cfg.Database.Psql)
 	}
@@ -92,7 +93,25 @@ func diagnose(root string) ([]check.Finding, []check.Check, error) {
 	if gitErr != nil {
 		return findings, nil, nil // outside a repo there is no fleet and no clone
 	}
-	return findings, dbChecks(d, root, mainRoot, wt, source, cfg), nil
+	return findings, append(checks, dbChecks(d, root, mainRoot, wt, source, cfg)...), nil
+}
+
+// loadConfig reads main's treehouse.toml and turns a parse error into a CHECK
+// rather than an abort. Every command that reads the file goes through here,
+// because a broken one has to do two things at once that are easy to separate
+// by accident: degrade to the built-in defaults everywhere, and be reported
+// everywhere.
+//
+// The empty File on error is deliberate. toml.Unmarshal fills what it managed
+// to read before it gave up, and half a curated `required` list is a judgment
+// nobody made.
+func loadConfig(mainRoot string) (config.File, []check.Check) {
+	cfg, err := config.Load(mainRoot)
+	if err == nil {
+		return cfg, nil
+	}
+	path := filepath.Join(mainRoot, "treehouse.toml")
+	return config.File{}, []check.Check{check.Doctor{}.CheckConfig(path, oneLine(err))}
 }
 
 // dbChecks asks Postgres the one question doctor always wants answered: does

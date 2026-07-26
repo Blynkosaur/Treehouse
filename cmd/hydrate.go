@@ -65,10 +65,14 @@ func hydrateAll(root string) error {
 		return err
 	}
 	// Read once, before any phase acts: a repo whose Postgres lives inside
-	// compose needs this in place before the clone is attempted, not after.
-	if cfg, err := config.Load(sourceRoot); err == nil {
-		pg.Use(cfg.Database.Psql)
+	// compose needs this in place before the clone is attempted, not after. A
+	// treehouse.toml that will not parse is a reported check and built-in
+	// defaults, never a reason to leave the worktree unhydrated.
+	cfg, cfgChecks := loadConfig(sourceRoot)
+	for _, c := range cfgChecks {
+		say("✗ %s: %s\n    fix: %s\n", c.Name, c.Detail, c.Fix)
 	}
+	pg.Use(cfg.Database.Psql)
 
 	repairs := check.Doctor{}.PlanHydrate(wt, source)
 	// A clean env phase is a note, not an exit: the phases below still run.
@@ -79,7 +83,7 @@ func hydrateAll(root string) error {
 		return err
 	}
 
-	hydrateDeps(root, wt, source, sourceRoot)
+	hydrateDeps(root, wt, source, cfg)
 	return hydrateDerive(root, sourceRoot, source)
 }
 
@@ -155,12 +159,11 @@ func applyRepairs(root string, repairs []check.Repair) error {
 // line in the report, not a reason to abandon the worktree half-built.
 // ponytail: the clone is a CoW copy of main's tree, so an npm install running
 // in main at the same moment can yield a torn copy. Accepted, not handled.
-func hydrateDeps(root string, wt, source check.Worktree, sourceRoot string) {
+func hydrateDeps(root string, wt, source check.Worktree, cfg config.File) {
 	if hydrateSkipDeps {
 		return
 	}
 
-	cfg, _ := config.Load(sourceRoot) // absent/broken config: fall back to defaults
 	rules := config.Merge(check.DefaultDepRules(), cfg.Deps, func(r check.DepRule) string { return r.Name })
 
 	plans := check.Doctor{}.PlanDeps(wt, source, rules)
