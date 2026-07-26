@@ -36,13 +36,13 @@ Documented worktree pains (research + Bryan's own usage history) and the story t
 
 ## Build status — 2026-07-26
 
-Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`, `gc`, `seed`. (`th` is an alias for the `treehouse` binary.)
+Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`, `gc`, `seed`, `tui` (and bare `th`, which opens the dashboard on a terminal). (`th` is an alias for the `treehouse` binary.)
 
 | Status | Stories |
 | --- | --- |
-| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **L1** (`new`), **L2** (`ls`), **L3** (`rm`, teardown included) |
+| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **L1** (`new`), **L2** (`ls`), **L3** (`rm`, teardown included), **T1** (live TUI dashboard) |
 | 🟡 **Partial** | **C2** (doctor: env drift, db/migration/seed checks, `--ls`, `--json` schema 2, `--quiet`, exit codes 0/1/2, curated `[env] required` — no dead-service or stale-base checks), **A3** (migration state, with `diverged` cut from the AC — see below), **C5** (`init` scaffold — no `.env.example`/compose scan) |
-| ⬜ **Not started** | **L4** (`cd`), **A6** (redis), **B1–B3** (triage/why), **C3** (snapshot), **C4** (SessionStart hook), **T1** (TUI) |
+| ⬜ **Not started** | **L4** (`cd`), **A6** (redis), **B1–B3** (triage/why), **C3** (snapshot), **C4** (SessionStart hook) |
 
 Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktrees`/`Ref` (one porcelain parser), `EnvVarsByDir`, `Slug` (collision-safe branch → identifier), `Status` (one worktree, no I/O — the row a TUI renders), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`/`DBPlan`/`DBDrop`), `Check` (the non-env verdict beside `Finding`), and `treehouse.toml` config parsing with one generic name-keyed `Merge`.
 
@@ -155,6 +155,12 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 - Stack: bubbletea + lipgloss + bubbles (Charm). The TUI is a _renderer over `[]Result`_ — checkers are unchanged; text/JSON outputs remain first-class (hooks/agents need them).
 - Sequencing rule: built AFTER the plain CLI core works (sessions 4–5, lipgloss styling as the session-3 bridge). The TUI is the roof, not the foundation.
 - Differentiation: nothing in the space has a live health dashboard (workz = static table). This is the README GIF.
+- ✅ **Done (2026-07-26).** Bare `th` opens the board on a terminal; `th tui` is the explicit door. **The renderer premise held literally: `cmd/tui.go` adds no judgment.** Every cell is a field of `check.Status`, rendered by the same `envCell`/`dbCell`/`behindCell`/`dirtyCell` the `ls` table uses; the drill-in calls `diagnose` and `printReport`, the two functions `th doctor` calls, so it is a second _face_ on one answer and never a second answer. `printReport`/`printChecks` grew an `io.Writer` parameter purely to make that reuse possible, and `ls`'s fleet setup was extracted so the two views cannot disagree about which databases exist.
+- **Streaming is one `check.Row` per worktree per `tea.Cmd`.** Bubbletea runs each batched command on its own goroutine and delivers each result as it lands, so it _is_ the WaitGroup — the grid shows path and branch from git's porcelain immediately and spins only the cells no checker has answered for yet. Verified race-clean against a live pty.
+- **The TTY guard is load-bearing, not politeness.** Bubbletea cannot start without a controlling terminal, so without `isatty(os.Stdout)` every hook, CI job and agent capturing stdout would go from "prints help" to "exits 1". Non-TTY falls through to cobra's help, verbatim; `cmd/tui_test.go` pins it.
+- **`h` shells out to `th hydrate` via `tea.ExecProcess`, deliberately.** In-process it would write straight to `os.Stdout` (`say`/`sayln`, and `deps.RunRecreate` wires `cmd.Stdout` itself) and shred the frame, and it would set the package-level flag globals that are only safe because exactly one command runs per process. As a subprocess hydrate's output scrolls normally, the frame is restored, and only the affected row is re-asked — cells flip in place.
+- Keys: `q`/`ctrl-c` quit, `↑`/`↓`/`j`/`k` select, `enter` drill in, `esc` back, `h` hydrate the selected worktree, `r` refresh the fleet.
+- **Ceilings, on purpose.** The drill-in never passes `--db`, so it shows the env and clone checks but never runs the project's migration-status command — the same bargain `ls` makes, for the same reason. The board does not auto-poll; `r` and `h` are the refresh path. There is no services column, because there is no services checker yet (C2's dead-service check is still open) — when one lands it becomes a column here for free. `--json` and the text tables remain the first-class outputs for hooks and agents; the TUI is unreachable from them by construction.
 
 ## Design decision — Progressive configuration (Bryan's call, 2026-07-14) 🎯
 
