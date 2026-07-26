@@ -93,7 +93,7 @@ func runNew(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if !quiet {
-		printReport(findings, checks, path)
+		printReport(os.Stdout, findings, checks, path)
 	}
 	return verdict(findings, checks)
 }

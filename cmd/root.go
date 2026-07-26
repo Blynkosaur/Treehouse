@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +19,22 @@ var rootCmd = &cobra.Command{
 	SilenceUsage: true,
 	// Execute prints errors itself, so an exitCode never surfaces as text.
 	SilenceErrors: true,
+	RunE:          runRoot,
+}
+
+// runRoot is the one branch in treehouse that asks who is watching. A human at
+// a terminal gets the dashboard; everything else gets the help text it got
+// before the TUI existed, byte for byte.
+//
+// The guard is not a courtesy: bubbletea fails outright without a controlling
+// terminal, so a pipe, a CI log or an agent capturing stdout would turn `th`
+// from "prints help" into "exits 1". `th tui` is the explicit door for anyone
+// who wants the dashboard by name.
+func runRoot(cmd *cobra.Command, args []string) error {
+	if !isatty.IsTerminal(os.Stdout.Fd()) {
+		return cmd.Help()
+	}
+	return runTUI(cmd, args)
 }
 
 // exitCode is a verdict about the WORKTREE, returned as an error so commands
