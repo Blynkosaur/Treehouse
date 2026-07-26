@@ -196,7 +196,7 @@ func areas(findings []Finding, checks []Check) map[string]area {
 		for _, f := range findings {
 			if f.Drifted() {
 				a.red, a.fix = true, "th hydrate"
-				a.detail = "env drift in " + f.Dir + ": " + driftSummary(f)
+				a.detail = "env drift in " + f.Dir + ": " + f.Summary()
 				break
 			}
 		}
@@ -272,14 +272,19 @@ func trim(line string) string {
 	return line
 }
 
-func driftSummary(f Finding) string {
+// Summary is one drifted finding in a phrase, for the places that quote a
+// finding inside a sentence rather than printing it as a report — triage's
+// evidence and the SessionStart context. Empty when nothing drifted.
+func (f Finding) Summary() string {
 	switch {
 	case f.NoEnv:
 		return ".env missing entirely"
 	case len(f.Missing) > 0:
 		return "missing " + strings.Join(f.Missing, ", ")
-	default:
+	case len(f.Empty) > 0:
 		return "empty " + strings.Join(f.Empty, ", ")
+	default:
+		return ""
 	}
 }
 

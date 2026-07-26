@@ -241,6 +241,55 @@ func decodeVerdict(t *testing.T, out string) verdictJSON {
 	return v
 }
 
+// TestHookSession is C4: the agent starts the session already knowing what is
+// broken, in the fewest lines that can say it.
+func TestHookSession(t *testing.T) {
+	read := func(t *testing.T, out string) string {
+		t.Helper()
+		var got struct {
+			HookSpecificOutput struct {
+				HookEventName     string `json:"hookEventName"`
+				AdditionalContext string `json:"additionalContext"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("not the hook output protocol: %v\n%s", err, out)
+		}
+		if got.HookSpecificOutput.HookEventName != "SessionStart" {
+			t.Errorf("hookEventName = %q", got.HookSpecificOutput.HookEventName)
+		}
+		return got.HookSpecificOutput.AdditionalContext
+	}
+
+	t.Run("a drifted worktree names the drift and the fix", func(t *testing.T) {
+		out, _, code := runTri(t, driftedRepo(t), "", "hook", "session")
+		ctx := read(t, out)
+		if !strings.Contains(ctx, "KEY") || !strings.Contains(ctx, "th hydrate") {
+			t.Errorf("context does not say what is broken or how to fix it:\n%s", ctx)
+		}
+		if n := len(strings.Split(ctx, "\n")); n > 8 {
+			t.Errorf("context is %d lines — it is prepended to a context window, not a report", n)
+		}
+		if code != 0 {
+			t.Errorf("exit %d — SessionStart is exit 0 whatever it finds", code)
+		}
+	})
+
+	t.Run("a green worktree still says so, in one line plus the tool", func(t *testing.T) {
+		out, _, code := runTri(t, cleanRepo(t), "", "hook", "session")
+		if code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		ctx := read(t, out)
+		if !strings.Contains(ctx, "all clear") {
+			t.Errorf("context does not report green:\n%s", ctx)
+		}
+		if n := len(strings.Split(ctx, "\n")); n > 2 {
+			t.Errorf("a green worktree costs %d lines of context; it should cost one plus the tool line:\n%s", n, ctx)
+		}
+	})
+}
+
 // TestTriageSignatureFromConfig: [[signature]] is the same name-keyed extension
 // point [[deps]] and [[seed]] are — a repo entry with a built-in's name takes
 // it over rather than sitting behind it.
