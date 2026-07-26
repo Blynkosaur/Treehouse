@@ -77,14 +77,15 @@ type board struct {
 	showing bool // in the drill-in rather than the grid
 	loading bool // a detail run is in flight
 
-	ready bool // a WindowSizeMsg has arrived, so the viewport has real dimensions
-	w, h  int
-	note  string // the last thing that happened, one line
+	note string // the last thing that happened, one line
 }
 
 func newBoard(cwd string) board {
 	s := spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(emptyStyle))
-	return board{cwd: cwd, spin: s}
+	// A viewport with zero height renders nothing, and the first frame is drawn
+	// before the terminal has told us its size. Start plausible; WindowSizeMsg
+	// corrects it a moment later.
+	return board{cwd: cwd, spin: s, detail: viewport.New(80, 20)}
 }
 
 func (b board) Init() tea.Cmd { return tea.Batch(b.spin.Tick, fleetCmd(b.cwd)) }
@@ -148,9 +149,8 @@ func (b board) hydrateCmd() tea.Cmd {
 func (b board) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		b.w, b.h = msg.Width, msg.Height
+		// Three lines go to the drill-in's own chrome: title, blank, help.
 		b.detail.Width, b.detail.Height = msg.Width, max(msg.Height-3, 1)
-		b.ready = true
 		return b, nil
 
 	case tea.KeyMsg:
@@ -341,11 +341,6 @@ func (b board) detailView() string {
 	body := b.detail.View()
 	if b.loading {
 		body = "  " + b.spin.View() + " checking…"
-	}
-	if !b.ready {
-		// No WindowSizeMsg yet, so the viewport has zero height and would render
-		// nothing at all. Show the report unclipped rather than a blank screen.
-		body = b.detail.View()
 	}
 	return head + "\n" + body + "\n" +
 		helpStyle.Render("  ↑/↓ scroll · h hydrate · r refresh · esc back · q quit")
