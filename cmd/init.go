@@ -83,6 +83,22 @@ const treehouseTOML = `# treehouse.toml — shared, committed project config (li
 # cause = "kafka is not reachable"
 # fix = "docker compose up -d kafka"
 # needs = "service"
+
+# Services doctor dials. Every PORT / *_PORT key in a .env is already inferred
+# and checked as a WARNING — this is for the ones that must be up (a FAILURE,
+# exit 2) or that no .env declares at all. The name of an inferred row is
+# "<dir>/<KEY>", or just "<KEY>" at the root; reuse it here to sharpen that row
+# instead of adding a second one.
+# [[service]]
+# name = "redis"
+# addr = "127.0.0.1:6379"
+# fix = "docker compose up -d redis"
+
+# What "th new" opens once the worktree comes up. Skipped silently when unset,
+# and never run when doctor FAILS — handing over a broken worktree is the one
+# thing "born ready" exists to prevent. --open / --no-open force either way.
+# [open]
+# command = "cursor ."
 `
 
 // runInit writes treehouseTOML to the current directory, refusing to overwrite

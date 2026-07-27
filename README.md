@@ -28,16 +28,17 @@ present, ports and compose project of their own — instead of born broken.
 | --- | --- |
 | `th` | On a terminal, opens the live dashboard. Anywhere else — a pipe, CI, an agent capturing stdout — prints this help instead. |
 | `th tui` | The dashboard, explicitly. |
-| `th new <branch>` | Cuts a worktree beside the main checkout and runs the full hydrate pipeline, then prints a doctor report. `--from <ref>`, `--path <dir>`, `--skip-deps`. |
+| `th new <branch>` | Cuts a worktree beside the main checkout and runs the full hydrate pipeline, then prints a doctor report and hands it to your `[open]` command. `--from <ref>`, `--path <dir>`, `--skip-deps`, `--open`, `--no-open`. |
 | `th hydrate` | Fills this worktree's `.env` files from the main checkout, provisions heavy dep dirs, clones this branch's database, then writes derived values. `--dry`, `--skip-deps`, `--force-db`. |
-| `th doctor` | Reports env drift per service, plus whether this worktree has its own database and is pointed at it. `--db` adds migration and seed state. `--ls` table, `--json`, `--quiet`. |
+| `th doctor` | Reports env drift per service, whether this worktree has its own database and is pointed at it, whether the services it declares are listening, and how far behind main it is. `--db` adds migration and seed state. `--ls` table, `--json`, `--quiet`. |
 | `th ls` | One table: every worktree × branch × env × db × behind-main × dirty. Exits 2 on a FAIL fleet, like `doctor`. `--json`. |
 | `th triage -- <cmd>` | Runs the command, streams it, and afterwards says whether the failure was the environment or the code. `--stdin`, `--hook`. |
 | `th hook session` | Claude Code `SessionStart`: hands the agent this worktree's env and database state. |
-| `th rm <branch>` | Removes a worktree, its branch, and its database clone. Refuses dirty or unpushed work without `--force`, and always refuses the worktree you're standing in. |
+| `th rm <branch>` | Removes a worktree, its branch, its database clone and its compose project. Refuses dirty or unpushed work without `--force`, and always refuses the worktree you're standing in. |
 | `th gc` | Lists the database clones whose worktrees are gone and drops them after confirmation. `-y`, `--json`. |
 | `th seed <name>` | Runs a named `[[seed]]` dataset against this worktree's own database. |
 | `th make` | Generates `.env.example` from each service's `.env`, values blanked. |
+| `th path <branch>` | Prints that branch's worktree path, and nothing else — the resolver behind the [`tcd` shell function](#jumping-between-worktrees). |
 | `th init` | Writes a commented `treehouse.toml` scaffold. |
 
 Hydrate runs three phases in order — **fill canonical → provision deps → derive** —
@@ -80,7 +81,7 @@ remain the outputs to script against.
 | --- | --- |
 | 0 | healthy, warnings only, or checks that could not be run |
 | 1 | treehouse itself failed (usage, git, IO) |
-| 2 | a FAIL finding: a curated required key missing or empty, a `.env` targeting the shared database while its own clone exists, a database name Postgres cannot hold, or a `treehouse.toml` that will not parse |
+| 2 | a FAIL finding: a curated required key missing or empty, a `.env` targeting the shared database while its own clone exists, a database name Postgres cannot hold, a declared `[[service]]` with nothing listening, or a `treehouse.toml` that will not parse |
 
 `th doctor` and `th ls` both answer this way, so an agent can gate on the fleet
 without parsing a table. Two documented exceptions, both in
@@ -226,11 +227,26 @@ Row two is why this is not `grep`. A confident wrong "it's your environment"
 sends an agent to reinstall Postgres over a typo in its own code, which is
 strictly worse than saying nothing.
 
-**A known gap:** `connection refused` needs a service check, and treehouse does
-not have one yet (C2). So that signature can never be corroborated and always
-lands on `unknown` with regex-only evidence, which the verdict says out loud.
-It is not faked, and when the dead-service check lands it starts reaching
-`environment` on its own.
+**The gap that used to be here is closed.** `connection refused` needs a service
+check, and for one whole phase treehouse had none — so that signature could
+never be corroborated and always landed on `unknown` with regex-only evidence.
+Dialling the port from inside triage was refused as a check smuggled in through
+the back door; the honest fix was building the checker. It exists now, and the
+signature reaches `environment` on its own:
+
+```
+th triage -- npm start
+…
+th triage: environment (matched connection-refused)
+  Error: connect ECONNREFUSED 127.0.0.1:4000
+  nothing is listening on the address the app dialled
+  doctor agrees: api/PORT — nothing is listening on 127.0.0.1:4000
+  fix: start the service (docker compose up -d), then re-run
+  fix: docker compose up -d api
+```
+
+Every service up and the same output still lands on `unknown`, with the
+contradiction spelled out — row two of the table, doing its job.
 
 ### The three modes, and their exit codes
 
@@ -286,6 +302,108 @@ in `ls` and in both JSON outputs, because the file is nothing but human judgment
 is the one exception: it cannot work without the file at all, so it errors.
 
 Neither hook ever fails over it. `th triage --hook` and `th hook session` exit 0.
+
+## Dead services, and a stale base
+
+`th doctor` dials what this repo says should be listening. **Discovery is the
+`PORT` keys your `.env` files already carry** — the same keys hydrate shifts to
+give each worktree its own ports. A key named `PORT` in `svc_a/.env` *is* the
+statement that svc_a should have a listener, so nothing here parses a
+docker-compose file: a second discovery path would be a second source of truth,
+disagreeing with the one hydrate acts on.
+
+```
+th doctor
+✓ api: .env has all 7 expected keys
+✓ service: api/PORT is listening on 127.0.0.1:4002
+! service: worker/PORT — nothing is listening on 127.0.0.1:5002
+    fix: docker compose up -d
+✗ service: redis — nothing is listening on 127.0.0.1:6379
+    fix: docker compose up -d redis
+! base: 12 commit(s) behind main
+    fix: git fetch && git rebase origin/main
+```
+
+Rows are named `<dir>/<KEY>`, or just `<KEY>` at the repo root. Dials are
+concurrent with a **250 ms** timeout — a doctor that takes five seconds because
+three services are down is a doctor nobody runs — and go to `127.0.0.1`, never
+`localhost`, so the answer doesn't depend on your resolver.
+
+**Inferred services warn; declared ones fail.** A `PORT` key is a guess about
+intent, so it is a WARN and exits 0. A `[[service]]` entry is a human saying
+this must be up, so it is a FAIL and exits 2 — the same progressive-configuration
+tier that makes an inferred env key a warning and a `[env] required` one a
+failure.
+
+```toml
+# treehouse.toml, committed
+[[service]]
+name = "redis"                     # reuse an inferred row's name to sharpen it
+addr = "127.0.0.1:6379"            # instead of adding a second row
+fix = "docker compose up -d redis"
+```
+
+**A repo that declares no port gets no service rows at all** — not a green one.
+Nothing to check is a different sentence from checked and found nothing wrong,
+which is the same rule that gives a repo with no database no `db` row. A
+`[[service]]` with no `addr` is `skip`: a typo in a TOML file is not a dead
+service, and it is not a healthy one either.
+
+**Never from `th ls`.** The fleet table exists to be glanced at, and a network
+fan-out per row is not a glance — the same bargain migrations make.
+
+The `base` row is the stale-base check, over the same count `th ls` shows in its
+BEHIND column. **WARN, never FAIL:** a stale branch is a smell, the code still
+runs, and an exit 2 on a worktree that works is how a checker teaches people to
+stop reading it. The main checkout gets no row, because `HEAD..main` is always
+zero there and "up to date" printed over a main that is ten behind origin would
+be a green nobody measured. The count is against your **local** main and doctor
+does not fetch, so a stale local main under-reports; the fix line fetches.
+
+## Handing over a finished worktree
+
+```toml
+# treehouse.toml, committed
+[open]
+command = "cursor ."     # or "claude", or "code .", or "tmux new-session"
+```
+
+`th new` runs it with the worktree as the working directory, after the doctor
+report. Unset means nothing happens and nothing is said. `--open` and
+`--no-open` force either way.
+
+**It does not fire when doctor reports a FAIL**, and that guard is the whole
+point of *born ready*: hand somebody a worktree whose `.env` still targets the
+shared database and they will start working in it before they read the report
+scrolling past above their editor. Warnings do not block — inferred drift and a
+dead port are the normal state of a repo you have not started yet. `--open`
+overrides.
+
+It runs in the **foreground and waits**, which is right for both shapes of
+command: `cursor .` forks its editor and returns immediately, so waiting costs
+nothing, while `claude` needs the terminal — backgrounding it would leave it
+fighting your returning shell prompt for stdin. A command that fails is a
+report line, never an exit code.
+
+## Jumping between worktrees
+
+There is no `th cd`, and there will not be one: a process cannot change its
+parent shell's directory. `th path <branch>` prints the path — one line on
+stdout, nothing else, non-zero and silent when the branch has no worktree, so a
+`cd` to nothing can never land you in `$HOME`. Wrap it:
+
+```sh
+# bash / zsh — in .bashrc or .zshrc
+tcd() { cd "$(th path "$1")"; }
+```
+
+```fish
+# fish — in config.fish
+function tcd; cd (th path $argv[1]); end
+```
+
+`th path` also completes branch names, so `th path <TAB>` offers the worktrees
+you have (`th completion zsh`/`bash`/`fish` installs it the usual way).
 
 ## Claude Code hooks (UNVERIFIED — read this before pasting)
 
@@ -379,3 +497,12 @@ stable across changes to it.
 **Caveat:** this shifts the ports your app processes bind. A compose file's own
 `ports: "3000:3000"` host mapping is **not** rewritten — parameterize it
 (`"${PORT}:3000"`) if you run compose in more than one worktree at a time.
+
+`th rm` tears the compose project back down (`docker compose -p <project> down`)
+before it removes the worktree, using the project name out of that worktree's
+own `.env` — known, not guessed. It refuses any name the main checkout also
+claims: a half-hydrated worktree still carries main's project name, and tearing
+*that* down would stop the containers you are working in, from a command you ran
+about a different branch. It is `down`, never `down -v`, because volumes are
+data. No docker, no daemon, or a project that was never started: all silent, and
+none of them can fail a `th rm`.
