@@ -70,16 +70,58 @@ func TestTriageTable(t *testing.T) {
 			inEvidence: []string{"doctor reports the environment healthy"},
 		},
 		{
-			// The documented gap: no service check exists, so `connection
-			// refused` can never be corroborated and never reaches environment.
-			name:       "a signature needing a fact treehouse does not have stays unknown",
+			// A repo that declares no port has no service fact, so the signature
+			// still cannot be corroborated. Absent is not green.
+			name:       "connection refused with nothing to check stays unknown",
 			output:     "psycopg2.OperationalError: connection refused\n",
 			findings:   envGreen,
 			sigs:       DefaultSignatures(),
 			want:       "unknown",
 			wantSig:    "connection-refused",
-			inEvidence: []string{"connection refused", "no service check"},
+			inEvidence: []string{"connection refused", "declares no PORT keys"},
 			wantFixes:  []string{"start the service (docker compose up -d), then re-run"},
+		},
+		{
+			// C2's payoff, and the reason the service check exists at all. B1
+			// shipped with this row landing on `unknown` because `service` mapped
+			// onto nothing; a dead listener is a real fact now.
+			name:     "a dead service corroborates connection refused",
+			output:   "Error: connect ECONNREFUSED 127.0.0.1:4000\n",
+			findings: envGreen,
+			checks: []Check{{Name: "service", Status: "fail",
+				Detail: "api/PORT — nothing is listening on 127.0.0.1:4000", Fix: "docker compose up -d api"}},
+			sigs:       DefaultSignatures(),
+			want:       "environment",
+			wantSig:    "connection-refused",
+			inEvidence: []string{"ECONNREFUSED", "doctor agrees", "nothing is listening on 127.0.0.1:4000"},
+			wantFixes:  []string{"start the service (docker compose up -d), then re-run", "docker compose up -d api"},
+		},
+		{
+			name:     "every service up contradicts connection refused",
+			output:   "Error: connect ECONNREFUSED 127.0.0.1:4000\n",
+			findings: envGreen,
+			checks: []Check{{Name: "service", Status: "ok",
+				Detail: "api/PORT is listening on 127.0.0.1:4000"}},
+			sigs:       DefaultSignatures(),
+			want:       "unknown",
+			wantSig:    "connection-refused",
+			inEvidence: []string{"doctor reports service healthy", "more likely code"},
+		},
+		{
+			// One row per detected port, so the fact has to be the worst of them.
+			// Order must not decide it either way.
+			name:     "one dead service among healthy ones is still a dead service",
+			output:   "connection refused\n",
+			findings: envGreen,
+			checks: []Check{
+				{Name: "service", Status: "ok", Detail: "web/PORT is listening on 127.0.0.1:3000"},
+				{Name: "service", Status: "warn", Detail: "api/PORT — nothing is listening on 127.0.0.1:4000", Fix: "docker compose up -d"},
+				{Name: "service", Status: "ok", Detail: "admin/PORT is listening on 127.0.0.1:5000"},
+			},
+			sigs:       DefaultSignatures(),
+			want:       "environment",
+			wantSig:    "connection-refused",
+			inEvidence: []string{"doctor agrees", "127.0.0.1:4000"},
 		},
 		{
 			// skip means "the question does not apply", which is exactly as

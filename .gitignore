@@ -30,3 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Worktrees this repo makes of itself (git worktrees are never content of the parent)
+.claude/worktrees/

@@ -133,6 +133,28 @@ func (d Doctor) CheckDB(s DBState) Check {
 	return c
 }
 
+// CheckBase reports how far this worktree has drifted behind the main branch.
+//
+// WARN, never FAIL: a stale branch is a smell, not a broken environment. The
+// code still runs, the tests still pass, and the only thing waiting is a rebase
+// the human may be deliberately putting off. Failing here would put an exit 2
+// on worktrees that are working fine, which is how a checker teaches people to
+// stop reading it.
+//
+// The fix names origin because that is the useful rebase — after the fetch it
+// is at least as far ahead as the local branch this count came from.
+func (d Doctor) CheckBase(behind int, mainBranch string) Check {
+	c := Check{Name: "base"}
+	if behind == 0 {
+		c.Status, c.Detail = "ok", "up to date with "+mainBranch
+		return c
+	}
+	c.Status = "warn"
+	c.Detail = fmt.Sprintf("%d commit(s) behind %s", behind, mainBranch)
+	c.Fix = "git fetch && git rebase origin/" + mainBranch
+	return c
+}
+
 // rank orders the four words so a fold can take the worst of them. It is the
 // one place the tiers are written down.
 //

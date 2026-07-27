@@ -93,7 +93,55 @@ func diagnose(root string) ([]check.Finding, []check.Check, error) {
 	if gitErr != nil {
 		return findings, nil, nil // outside a repo there is no fleet and no clone
 	}
-	return findings, append(checks, dbChecks(d, root, mainRoot, wt, source, cfg)...), nil
+	// One git call for the fleet, shared by the db row (which worktree is this)
+	// and the base row (what is it behind). Two would be two chances to disagree.
+	refs, _ := check.Worktrees(root)
+	checks = append(checks, dbChecks(d, refs, root, mainRoot, wt, source, cfg)...)
+	checks = append(checks, serviceChecks(d, wt, cfg)...)
+	return findings, append(checks, baseChecks(d, refs, root, mainRoot)...), nil
+}
+
+// serviceChecks dials what this worktree says should be listening. The list is
+// inferred from the PORT keys and sharpened by treehouse.toml through the same
+// name-keyed Merge [[deps]], [[seed]] and [[signature]] use.
+//
+// Never reachable from `th ls`, the same constraint migrations live under: the
+// fleet table exists to be glanced at, and a network fan-out per row is not a
+// glance. A dial is cheap enough that a services column is viable later; it is
+// not free enough to add one without asking.
+func serviceChecks(d check.Doctor, wt check.Worktree, cfg config.File) []check.Check {
+	// Declared is set HERE rather than read from the file: it is not a key a
+	// human writes, it is the fact that a human wrote the entry at all — and
+	// that fact is what earns the FAIL tier over an inferred row's WARN.
+	declared := make([]check.Service, len(cfg.Service))
+	for i, s := range cfg.Service {
+		s.Declared = true
+		declared[i] = s
+	}
+	services := config.Merge(check.InferServices(wt), declared, check.ServiceName)
+	if len(services) == 0 {
+		return nil // nothing to check is not the same as nothing wrong
+	}
+	return d.CheckServices(services, check.DialServices(services))
+}
+
+// baseChecks reports how far behind the main branch this worktree has drifted,
+// reusing the same count `th ls` shows in its BEHIND column.
+//
+// Not emitted for the main checkout itself, and that is a correctness rule
+// rather than tidiness: the count is HEAD..<main branch>, which in main is
+// always zero, so a row there would print "up to date" over a main that is ten
+// commits behind origin. Reporting green for something nobody measured is the
+// one thing this report may not do.
+//
+// ponytail: measured against the LOCAL main branch, and doctor does not fetch —
+// a stale local main under-reports. The fix line fetches; `th new` already does.
+func baseChecks(d check.Doctor, refs []check.Ref, root, mainRoot string) []check.Check {
+	branch := mainBranch(refs)
+	if branch == "" || samePath(root, mainRoot) {
+		return nil // no main branch to be behind, or standing on it
+	}
+	return []check.Check{d.CheckBase(check.Behind(root, branch), branch)}
 }
 
 // loadConfig reads main's treehouse.toml and turns a parse error into a CHECK
@@ -120,7 +168,7 @@ func loadConfig(mainRoot string) (config.File, []check.Check) {
 // Postgres is asked exactly once, and only when main's .env names a database at
 // all — so `th doctor` in a repo with no Postgres never shells out, the same
 // bargain hydrate makes.
-func dbChecks(d check.Doctor, root, mainRoot string, wt, source check.Worktree, cfg config.File) []check.Check {
+func dbChecks(d check.Doctor, refs []check.Ref, root, mainRoot string, wt, source check.Worktree, cfg config.File) []check.Check {
 	template := check.EnvDB(source)
 	if template == "" {
 		return nil // no database in this repo: no row, not an empty one
@@ -130,7 +178,6 @@ func dbChecks(d check.Doctor, root, mainRoot string, wt, source check.Worktree, 
 		return unreachable("postgres is not reachable: " + oneLine(err))
 	}
 
-	refs, _ := check.Worktrees(root)
 	state := check.DBState{
 		Plan:  d.PlanDB(check.DBInput{Template: template, Existing: names, Slug: branchSlug(refs, root)}),
 		EnvDB: check.EnvDB(wt),

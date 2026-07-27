@@ -25,6 +25,15 @@ type File struct {
 	Migrations Migrations        `toml:"migrations"`
 	Seed       []check.Seed      `toml:"seed"`
 	Signature  []check.Signature `toml:"signature"`
+	Service    []check.Service   `toml:"service"`
+	Open       Open              `toml:"open"`
+}
+
+// Open is L1's hand-off: the command `th new` runs inside a worktree that came
+// up healthy. Un-inferable by construction — nothing in a repo says whether its
+// owner uses an editor, a TUI agent, or neither.
+type Open struct {
+	Command string `toml:"command"`
 }
 
 // Env carries the human's judgment about env keys. Required is the whole FAIL

@@ -174,16 +174,15 @@ var areaOrder = []string{needsEnv, needsDB, needsMigration, needsService}
 
 // areas folds doctor's two lists into the facts a signature can cite.
 //
-// ponytail: `service` maps onto NOTHING — treehouse has no service check, so
-// there is no fact that can corroborate `connection refused`, and that
-// signature degrades to regex-only evidence with cause `unknown`. Faking it
-// (dialling the port ourselves) would be a new kind of check smuggled in
-// through triage; the honest fix is C2's dead-service check, and when it lands
-// it fills this entry and `connection refused` starts reaching `environment`
-// on its own.
+// `service` is the one that took two phases to become real. It used to map onto
+// nothing, so `connection refused` — the signature this whole file was written
+// for — could never be corroborated and always degraded to regex-only evidence
+// with cause `unknown`. CheckServices fills it now: a dead listener is a red
+// service fact, and the verdict reaches `environment` with the matched line and
+// the dead service side by side.
 func areas(findings []Finding, checks []Check) map[string]area {
 	out := map[string]area{
-		needsService: {detail: "treehouse has no service check — nothing here knows whether that port should have a listener"},
+		needsService: {detail: "doctor found no service to check — this repo declares no PORT keys and no [[service]] entries"},
 		needsDB:      {detail: "doctor did not report on the database"},
 		needsMigration: {
 			detail: "doctor did not report on migrations (they need `th doctor --db` and a [migrations] status command)",
@@ -203,6 +202,11 @@ func areas(findings []Finding, checks []Check) map[string]area {
 		out[needsEnv] = a
 	}
 
+	// worst is which row already spoke for each area. Services arrive one row per
+	// detected port, so the fact has to be the WORST of them rather than the last
+	// one walked: `connection refused` is about the dead one, and a healthy
+	// sibling must not vote it green.
+	worst := map[string]string{}
 	for _, c := range checks {
 		name := c.Name
 		if name == "migrations" {
@@ -211,6 +215,10 @@ func areas(findings []Finding, checks []Check) map[string]area {
 		if _, ok := out[name]; !ok {
 			continue // seed and anything later: no signature leans on it yet
 		}
+		if seen, ok := worst[name]; ok && worse(seen, c.Status) == seen {
+			continue
+		}
+		worst[name] = c.Status
 		// skip is not green: it means the question does not apply here, which is
 		// exactly as uninformative as never having asked.
 		if c.Status == skip {
