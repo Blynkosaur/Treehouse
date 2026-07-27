@@ -116,6 +116,48 @@ func TestVerdict(t *testing.T) {
 	}
 }
 
+// TestPlanOpen is L1's hand-off rule: born ready means never handing somebody a
+// worktree that isn't.
+func TestPlanOpen(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		verdict string
+		force   bool
+		refuse  bool
+		want    string // the command that runs; "" = nothing does
+		inSkip  string // substring the skip line must carry; "" = say nothing
+	}{
+		{name: "healthy and configured", command: "cursor .", verdict: "ok", want: "cursor ."},
+		// Warnings are the normal state of a repo nobody has run yet. A hand-off
+		// that almost never fires is one nobody configures.
+		{name: "warnings do not block", command: "cursor .", verdict: "warn", want: "cursor ."},
+		{name: "a skipped check does not block either", command: "cursor .", verdict: skip, want: "cursor ."},
+		{name: "a failure does", command: "cursor .", verdict: "fail", inSkip: "not handing over a broken worktree"},
+		{name: "--open overrides the failure", command: "cursor .", verdict: "fail", force: true, want: "cursor ."},
+		{name: "--no-open wins, silently", command: "cursor .", verdict: "ok", refuse: true},
+		{name: "--no-open wins over --open's own override", command: "cursor .", verdict: "fail", force: true, refuse: true},
+		// The common case by far: most repos have no opinion, and a nag per
+		// `th new` is how a good flag gets turned off.
+		{name: "unconfigured says nothing at all", verdict: "ok"},
+		{name: "unless --open asked for it", verdict: "ok", force: true, inSkip: "no [open] command configured"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := PlanOpen(c.command, c.verdict, c.force, c.refuse)
+			if got.Command != c.want {
+				t.Errorf("Command = %q, want %q", got.Command, c.want)
+			}
+			switch {
+			case c.inSkip == "" && got.Skip != "":
+				t.Errorf("Skip = %q, want silence", got.Skip)
+			case c.inSkip != "" && !strings.Contains(got.Skip, c.inSkip):
+				t.Errorf("Skip = %q, want it to mention %q", got.Skip, c.inSkip)
+			}
+		})
+	}
+}
+
 // TestStatusDBColumn is ITEM 1's regression. The column used to answer
 // clone-exists only, so a worktree whose clone existed while its .env still
 // named the SHARED database read `db: ok` in the glance view — green, in the

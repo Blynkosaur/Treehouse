@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/Blynkosaur/treehouse/internal/envfile"
@@ -138,6 +139,35 @@ func (w Worktree) EnvVarsByDir() map[string]map[string]string {
 		}
 	}
 	return byDir
+}
+
+// ComposeProjects names the compose projects this worktree owns: the
+// COMPOSE_PROJECT_NAME E2 wrote into its .env files, minus every name the main
+// checkout also claims.
+//
+// That subtraction is the whole guard, and it is the compose version of the
+// shared-database failure. A worktree hydrate only half-finished still carries
+// main's project name in its .env; tearing THAT down on `th rm` would stop the
+// containers somebody is working in, from a command they ran about a different
+// branch. Same rule the database side follows: only what this worktree owns.
+func ComposeProjects(w, source Worktree) []string {
+	shared := map[string]bool{}
+	for _, vars := range source.EnvVarsByDir() {
+		shared[vars["COMPOSE_PROJECT_NAME"]] = true
+	}
+
+	seen := map[string]bool{}
+	var out []string
+	for _, vars := range w.EnvVarsByDir() {
+		name := vars["COMPOSE_PROJECT_NAME"]
+		if name == "" || shared[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Ref is git's view of one worktree — the checkout as the repository knows it,

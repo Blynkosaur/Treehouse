@@ -133,6 +133,28 @@ func (d Doctor) CheckDB(s DBState) Check {
 	return c
 }
 
+// CheckBase reports how far this worktree has drifted behind the main branch.
+//
+// WARN, never FAIL: a stale branch is a smell, not a broken environment. The
+// code still runs, the tests still pass, and the only thing waiting is a rebase
+// the human may be deliberately putting off. Failing here would put an exit 2
+// on worktrees that are working fine, which is how a checker teaches people to
+// stop reading it.
+//
+// The fix names origin because that is the useful rebase — after the fetch it
+// is at least as far ahead as the local branch this count came from.
+func (d Doctor) CheckBase(behind int, mainBranch string) Check {
+	c := Check{Name: "base"}
+	if behind == 0 {
+		c.Status, c.Detail = "ok", "up to date with "+mainBranch
+		return c
+	}
+	c.Status = "warn"
+	c.Detail = fmt.Sprintf("%d commit(s) behind %s", behind, mainBranch)
+	c.Fix = "git fetch && git rebase origin/" + mainBranch
+	return c
+}
+
 // rank orders the four words so a fold can take the worst of them. It is the
 // one place the tiers are written down.
 //
@@ -149,6 +171,42 @@ func worse(a, b string) string {
 		return b
 	}
 	return a
+}
+
+// OpenPlan is what `th new` does with a worktree once it is built: L1's
+// optional hand-off to an editor or an agent.
+type OpenPlan struct {
+	Command string // run this with the worktree as cwd; "" = do nothing
+	Skip    string // why not, when the reader deserves to hear it; "" = say nothing
+}
+
+// PlanOpen decides whether the hand-off fires.
+//
+// The FAIL guard is the whole point of "born ready": handing somebody a
+// worktree whose database is pointed at the shared one, or whose curated
+// required keys are missing, is worse than handing them nothing — they will
+// start working in it before they read the report scrolling past above the
+// editor. Warnings do NOT block, deliberately: inferred env drift and a dead
+// port are the normal state of a repo you have not run yet, and a hand-off that
+// almost never fires is a hand-off nobody configures.
+//
+// Silence is the default at every step. An unconfigured repo says nothing,
+// because most repos have no opinion here and a nag per `th new` is how a good
+// flag gets turned off.
+func PlanOpen(command, verdict string, force, refuse bool) OpenPlan {
+	switch {
+	case refuse:
+		return OpenPlan{} // --no-open: the human already said no, so no commentary
+	case command == "" && force:
+		// --open asked for something that does not exist. This one is worth
+		// saying: the flag did nothing, and silence looks like it worked.
+		return OpenPlan{Skip: "no [open] command configured in treehouse.toml"}
+	case command == "":
+		return OpenPlan{}
+	case verdict == "fail" && !force:
+		return OpenPlan{Skip: "doctor reported a failure — not handing over a broken worktree (--open overrides)"}
+	}
+	return OpenPlan{Command: command}
 }
 
 // Verdict folds env findings and checks into the one word the exit code, the

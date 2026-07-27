@@ -106,7 +106,7 @@ func (d Doctor) Status(w Worktree, ref Ref, source Worktree) Status {
 // second renderer would otherwise have to reimplement this.
 func (d Doctor) Row(ref Ref, source Worktree) Status {
 	ref.Dirty = gitDirty(ref.Path)
-	ref.Behind = gitBehind(ref.Path, d.MainBranch)
+	ref.Behind = Behind(ref.Path, d.MainBranch)
 	wt, _ := Discover(ref.Path) // unreadable worktree: still list it
 	return d.Status(wt, ref, source)
 }
@@ -118,8 +118,10 @@ func gitDirty(path string) bool {
 	return err == nil && strings.TrimSpace(out) != ""
 }
 
-// gitBehind counts commits the main branch has that this worktree doesn't.
-func gitBehind(path, mainBranch string) int {
+// Behind counts commits the main branch has that this worktree doesn't.
+// Exported so doctor's stale-base check is the same number `th ls` shows in its
+// BEHIND column, asked the same way — two git calls would be two answers.
+func Behind(path, mainBranch string) int {
 	if mainBranch == "" {
 		return 0 // detached or bare main: nothing to be behind
 	}

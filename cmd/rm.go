@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -69,6 +71,10 @@ func runRm(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Before the directory goes, not after: the project name lives in the .env
+	// inside it, and compose has more to work with while the tree still exists.
+	composeDown(target.Path, mainRoot)
+
 	remove := []string{"worktree", "remove", target.Path}
 	if rmForce {
 		remove = []string{"worktree", "remove", "--force", target.Path}
@@ -98,6 +104,47 @@ func runRm(cmd *cobra.Command, args []string) error {
 	}
 	say("✓ deleted branch %s\n", branch)
 	return nil
+}
+
+// composeDown stops and removes the containers of the compose project this
+// worktree owned — L3's other half of "remove without corpses". E2 wrote the
+// project name into the .env of every dir holding a compose file, so it is
+// known rather than guessed, and check.ComposeProjects is what refuses to touch
+// main's.
+//
+// Every failure is silent. No docker, no daemon, a project that was never
+// started: none of those are reasons to fail a `th rm` whose actual job — the
+// worktree and the branch — has nothing to do with containers. A stopped
+// project also costs nothing but disk, unlike the database clone.
+//
+// `down`, never `down -v`: volumes are data, and deleting somebody's database
+// volume because they removed a branch is not a cleanup, it is a loss.
+func composeDown(targetPath, mainRoot string) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return
+	}
+	wt, err := check.Discover(targetPath)
+	if err != nil {
+		return
+	}
+	source, err := check.Discover(mainRoot)
+	if err != nil {
+		return
+	}
+
+	for _, project := range check.ComposeProjects(wt, source) {
+		c := exec.Command("docker", "compose", "-p", project, "down")
+		// Deliberately run where there is NO compose file. With one, compose
+		// removes what that file declares; without one it works purely from the
+		// project label, which catches every container the project ever started —
+		// including those from a compose file that has changed since. It also
+		// cannot fail on YAML we are about to delete anyway.
+		c.Dir = os.TempDir()
+		if err := c.Run(); err != nil {
+			return // daemon down, most likely: nothing here may fail `th rm`
+		}
+		say("✓ tore down compose project %s\n", project)
+	}
 }
 
 // dropClone removes the database clone that belonged to the worktree just
