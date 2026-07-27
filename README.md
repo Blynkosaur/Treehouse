@@ -32,6 +32,7 @@ present, ports and compose project of their own — instead of born broken.
 | `th hydrate` | Fills this worktree's `.env` files from the main checkout, provisions heavy dep dirs, clones this branch's database, then writes derived values. `--dry`, `--skip-deps`, `--force-db`. |
 | `th doctor` | Reports env drift per service, plus whether this worktree has its own database and is pointed at it. `--db` adds migration and seed state. `--ls` table, `--json`, `--quiet`. |
 | `th ls` | One table: every worktree × branch × env × db × behind-main × dirty. Exits 2 on a FAIL fleet, like `doctor`. `--json`. |
+| `th why` | One line: what changed since everything was last green. Always exits 0. `--json`, `--db`. |
 | `th triage -- <cmd>` | Runs the command, streams it, and afterwards says whether the failure was the environment or the code. `--stdin`, `--hook`. |
 | `th hook session` | Claude Code `SessionStart`: hands the agent this worktree's env and database state. |
 | `th rm <branch>` | Removes a worktree, its branch, and its database clone. Refuses dirty or unpushed work without `--force`, and always refuses the worktree you're standing in. |
@@ -83,11 +84,14 @@ remain the outputs to script against.
 | 2 | a FAIL finding: a curated required key missing or empty, a `.env` targeting the shared database while its own clone exists, a database name Postgres cannot hold, or a `treehouse.toml` that will not parse |
 
 `th doctor` and `th ls` both answer this way, so an agent can gate on the fleet
-without parsing a table. Two documented exceptions, both in
+without parsing a table. Three documented exceptions. Two in
 [Triage](#triage-environment-or-code): `th triage -- <cmd>` passes the **wrapped
 command's** code through verbatim, because a wrapper that changes it is a
 wrapper you cannot put in front of anything; and `th triage --hook` always exits
-0, because it runs after every Bash call.
+0, because it runs after every Bash call. And [`th why`](#what-changed-since-it-was-green)
+always exits 0, because it answers what *changed*, not whether the worktree is
+healthy — asking why something broke should never itself be a failure in the
+script that just caught the break.
 
 Requirements inferred from `.env.example` are warnings. *Env* failures come only
 from a human-curated list:
@@ -194,6 +198,45 @@ It does **not** claim "diverged"; see A3 in [docs/user-stories.md](docs/user-sto
 that worktree's own database — so it rides the template copy (a new clone
 inherits main's datasets), it is dropped with the database, and there is no state
 file to keep in sync.
+
+## What changed since it was green?
+
+`th doctor` tells you what is true now. `th why` tells you what moved.
+
+```
+$ th why
+env went from ok to warn since 14:02: REDIS_URL missing
+
+$ th why
+db stopped being checked after you switched to feat/login: postgres is not reachable
+
+$ th why
+2 things changed since everything was green:
+  env went from ok to warn since 09:15: REDIS_URL, DATABASE_URL missing
+  db went from ok to fail since 09:15: .env still targets the SHARED database app_dev
+```
+
+A check that went from `ok` to **`skip`** gets its own sentence, because a check
+that stopped being *asked* has not stayed fine — that is usually the whole story.
+
+`th doctor` records what each check said; `th why` diffs the live report against
+it. **The journal lives in this worktree's own `.git/` directory** — for a linked
+worktree that is `<main>/.git/worktrees/<branch>/treehouse-state.json`. It is
+never committed, `git status` never sees it, and `git worktree remove` (so, `th
+rm`) deletes it along with everything else. Nothing to clean up, which is the
+same deal the port assignments (kept in the sibling `.env` files) and the seed
+marker (a table inside the database) already make.
+
+**It is disposable, and treehouse treats it that way.** Delete it, truncate it,
+hand-edit it, keep one from an older version — every case answers `no baseline
+yet — run th doctor first` and exits 0, and the next `th doctor` writes a fresh
+one. `doctor` never fails, warns, or slows down over it. It records only *when*
+each check was last ok and on which branch; what is wrong right now always comes
+from the live run, so the file cannot go stale or contradict a fix you made by
+hand.
+
+`th why` always exits 0 (see [Exit codes](#exit-codes)) and never runs your
+project's migration command unless you pass `--db`, exactly like `doctor`.
 
 ## Triage: environment or code?
 
@@ -367,7 +410,9 @@ Each worktree gets `COMPOSE_PROJECT_NAME=<app>_<slug>` in the `.env` of every
 directory that actually holds a compose file, and a deterministic port offset
 applied to every `PORT`/`*_PORT` key the main checkout declares. The registry is
 the sibling `.env` files themselves, so there is no state file to
-garbage-collect.
+garbage-collect. (The one file treehouse does keep, `th why`'s journal, lives
+inside the worktree's `.git/` and goes away with it — see
+[What changed since it was green?](#what-changed-since-it-was-green).)
 
 The offset is derived from the branch name, so the same branch normally lands on
 the same ports — but that is **not** a guarantee over time. The offset has to
