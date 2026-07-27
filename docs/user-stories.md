@@ -40,10 +40,9 @@ Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`, `gc`, 
 
 | Status | Stories |
 | --- | --- |
-| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **A6** (redis logical db), **L1** (`new`, `open` hook included), **L2** (`ls`), **L3** (`rm`, database and compose teardown included), **L4** (`th path` + the documented shell function), **B1** (`triage`, three modes, `connection refused` corroborated), **C2** (doctor, dead-service and stale-base checks included), **T1** (live TUI dashboard) |
+| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **A6** (redis logical db), **L1** (`new`, `open` hook included), **L2** (`ls`), **L3** (`rm`, database and compose teardown included), **L4** (`th path` + the documented shell function), **B1** (`triage`, three modes, `connection refused` corroborated), **B3** (`th why`), **C2** (doctor, dead-service and stale-base checks included), **T1** (live TUI dashboard) |
 | 🟡 **Partial** | **A3** (migration state, with `diverged` cut from the AC — see below), **B2** + **C4** (both hooks built and tested; the Claude Code wiring is unverified — see B2) |
 | ✂️ **Cut** | **C5**'s `.env.example`/compose scan (inference is live; a generated copy goes stale and wins), **C3** (`snapshot` — `make` is the same command with a different filename) |
-| ✂️ **Deferred** | **B3** (`why` — needs the one state file this project has refused everywhere else; see B3) |
 
 Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktrees`/`Ref` (one porcelain parser), `EnvVarsByDir`, `Slug` (collision-safe branch → identifier), `Status` (one worktree, no I/O — the row a TUI renders), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`/`DBPlan`/`DBDrop`/`OpenPlan`), `Check` (the non-env verdict beside `Finding`), `Triage` (the same correlation, pure), and `treehouse.toml` config parsing with one generic name-keyed `Merge` — now serving four lists (`[[deps]]`, `[[seed]]`, `[[signature]]`, `[[service]]`).
 
@@ -152,7 +151,22 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 **B3. Human one-liner.** `treehouse why` answers in one line what changed since everything was last green.
 
 - AC: state journal records last-green per check; `why` diffs current vs last-green.
-- ⬜ **Deferred (2026-07-26) — cut from phase 4, not from the product.** It needs a last-green state journal, and that is the one piece of new persistence this project has refused everywhere else on principle: the port registry is the sibling `.env` files, the seed marker is a table inside the database that gets dropped with it. Both were designed specifically so there is nothing for `th gc` to chase. A journal reintroduces exactly that — a file that goes stale, that lies after a manual fix, and that nothing cleans up. Revisit only with an answer for where it lives and who deletes it.
+- ✅ **Done (2026-07-26).** `th doctor` records the journal, `th why` diffs the live report against it and answers in one line: `env went from ok to warn since 14:02: REDIS_URL missing`, `db stopped being checked after you switched to feat/login: postgres is not reachable`. Several changes fall back to a headline over a short list. `--json` in the existing envelope, and it always exits 0 — `why` answers what CHANGED, not whether the worktree is healthy, and doctor and `ls` already gate on that.
+
+**Why the objection dissolved.** It was deferred twice on where the journal lives, and that is the only thing that changed: **it lives in the worktree's own git directory**, `<main>/.git/worktrees/<name>/treehouse-state.json`, found with `git rev-parse --absolute-git-dir` (a linked worktree's `.git` is a *file*, so `<root>/.git/` would have put it in the working tree — committed by somebody's `git add -A`, and visible in `git status` forever). There:
+
+- it is never committed and `git status` never sees it;
+- **`git worktree remove` deletes it**, along with `th rm`, which calls it — so there is still nothing for `th gc` to chase, the same bargain E3's port registry (the sibling `.env` files) and A4's seed marker (a table inside the database, dropped with it) already make;
+- it is per-worktree by construction, so it cannot answer about the wrong branch.
+
+**And it is an optimization, never a dependency** — the other half of the original objection, that a state file goes stale and lies after a manual fix:
+
+- missing, unreadable, truncated, hand-edited, or written by an older schema all answer the same way, `no baseline yet — run th doctor first`, exit 0. There is no repair path and no error, because every one of those is a reason to stop trusting the file and none of them is a reason to stop working;
+- `doctor` writes it with every error swallowed. A doctor that failed — or even warned — because a state file could not be written is precisely what this project refused to build;
+- written temp-then-rename in the same directory, `envfile.Set`'s discipline: surviving a torn file every run is not the same as never causing one;
+- it stores only **when each row was last ok and on which branch**. Everything about what is wrong *now* comes from the live report, so there is no stored detail line that can go stale or contradict a manual fix.
+- `check.Snapshot` flattens findings and checks into one flat vocabulary of `Check`s (env rows become `env` / `env (api)`) rather than a second near-identical struct, and `check.Explain` is a pure function over it — every sentence above is tested from struct literals with the clock and the branch handed in.
+- **`ok` → `skip` gets its own sentence**, per the rule that runs through the whole report: a check that stopped being *asked* has not stayed fine, and it is usually the actual story (Postgres went down, so the db check stopped running). Phrasing it as "went from ok to skip" would bury that in a failure's wording.
 
 ---
 

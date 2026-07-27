@@ -49,6 +49,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	recordJournal(root, findings, checks) // what `th why` diffs against; never fails a run
 
 	switch {
 	case jsonOut:
