@@ -259,3 +259,64 @@ func TestEnvVarsByDirEmpty(t *testing.T) {
 		t.Errorf("EnvVarsByDir() len = %d, want 0", len(got))
 	}
 }
+
+// TestComposeProjects is L3's teardown guard. The dangerous case is the third
+// one: a half-hydrated worktree still carrying main's project name, where
+// tearing "its" project down would stop the containers somebody is working in.
+func TestComposeProjects(t *testing.T) {
+	at := func(root string, byDir map[string]map[string]string) Worktree {
+		w := Worktree{Root: root}
+		for rel, vars := range byDir {
+			w.EnvFiles = append(w.EnvFiles, envfile.File{
+				Path: filepath.Join(root, rel, ".env"), Vars: vars,
+			})
+		}
+		return w
+	}
+	main := at("/main", map[string]map[string]string{
+		".":   {"COMPOSE_PROJECT_NAME": "app"},
+		"api": {"COMPOSE_PROJECT_NAME": "app"},
+	})
+
+	cases := []struct {
+		name string
+		wt   Worktree
+		want []string
+	}{
+		{
+			name: "the worktree's own project, once, however many dirs declare it",
+			wt: at("/w", map[string]map[string]string{
+				".":   {"COMPOSE_PROJECT_NAME": "app_feat_a"},
+				"api": {"COMPOSE_PROJECT_NAME": "app_feat_a"},
+			}),
+			want: []string{"app_feat_a"},
+		},
+		{
+			name: "two compose roots that really did get two projects",
+			wt: at("/w", map[string]map[string]string{
+				".":   {"COMPOSE_PROJECT_NAME": "app_feat_a"},
+				"api": {"COMPOSE_PROJECT_NAME": "api_feat_a"},
+			}),
+			want: []string{"api_feat_a", "app_feat_a"},
+		},
+		{
+			name: "never main's, however it got there",
+			wt:   at("/w", map[string]map[string]string{".": {"COMPOSE_PROJECT_NAME": "app"}}),
+		},
+		{
+			name: "a worktree that never hydrated declares nothing",
+			wt:   at("/w", map[string]map[string]string{".": {"PORT": "3000"}}),
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ComposeProjects(c.wt, main)
+			if len(got) == 0 && len(c.want) == 0 {
+				return
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("ComposeProjects = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
