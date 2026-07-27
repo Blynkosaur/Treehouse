@@ -146,6 +146,29 @@ func (d Doctor) PlanDerive(w, source Worktree, in DeriveInput) []Repair {
 		}
 	}
 
+	// A6: one Redis logical db per worktree, so a cache flush here cannot take out
+	// a neighbour's sessions. Same predicate as E3 — derived from the slug,
+	// disjoint from what main and every sibling already declare — and keyed off
+	// SOURCE for the same reason, since main's files are what say this repo uses
+	// Redis at all. main is in the registry, so the db main sits on (0 by
+	// convention, and by default when a URL carries no path) is never handed out.
+	if base := redisByDir(source); len(base) > 0 {
+		registry := make([]Worktree, 0, len(in.Fleet)+1)
+		registry = append(registry, source)
+		registry = append(registry, in.Fleet...)
+
+		if n, ok := freeRedisDB(in.Slug, registry); ok {
+			for rel, keys := range base {
+				r := at(filepath.Join(w.Root, rel))
+				for key, val := range keys {
+					r.Add[key] = redisPoint(key, val, n)
+				}
+			}
+		} else {
+			at(w.Root).Skip = note(at(w.Root).Skip, "no free Redis logical db — all 16 are claimed by main and its worktrees")
+		}
+	}
+
 	repairs := make([]Repair, 0, len(byPath))
 	for _, r := range byPath {
 		repairs = append(repairs, *r)
@@ -281,4 +304,108 @@ func fits(base map[string]map[string]int, offset int, used map[int]bool) bool {
 		}
 	}
 	return true
+}
+
+// redisSpread is Redis's own default `databases 16`: logical dbs 0 through 15.
+const redisSpread = 16
+
+// redisIndex reads a Redis logical-db declaration, or reports that the key isn't
+// one. REDIS_DB carries the index bare; REDIS_URL carries it as the path, and
+// net/url reads that — never a regex, for the reasons DBFromURL gives: a redis
+// URL puts credentials before the host and ?query after the db, and a pattern
+// eats one or the other. An empty path is db 0, which is what a client defaults
+// to when the URL doesn't say.
+//
+// Out-of-range indexes are still declarations: a cluster started with
+// `databases 32` is somebody's real setup, and a db we refuse to READ is a db we
+// would happily hand to a second worktree. Only assignment is capped at 16.
+//
+// ponytail: detection is by exact key name, like portValue's. CACHE_URL and
+// friends are invisible; add a config list of Redis keys when someone hits it.
+func redisIndex(key, val string) (int, bool) {
+	val = strings.TrimSpace(val)
+	switch key {
+	case "REDIS_DB":
+		n, err := strconv.Atoi(val)
+		return n, err == nil && n >= 0
+	case "REDIS_URL":
+		u, err := url.Parse(val)
+		if err != nil || (u.Scheme != "redis" && u.Scheme != "rediss") {
+			return 0, false
+		}
+		if len(u.Path) < 2 {
+			return 0, true // redis://localhost:6379 — no path, so db 0
+		}
+		n, err := strconv.Atoi(u.Path[1:])
+		return n, err == nil && n >= 0
+	}
+	return 0, false
+}
+
+// redisPoint rewrites one declaration to name logical db n. A URL keeps its
+// scheme, credentials, host and query — only the path moves.
+func redisPoint(key, val string, n int) string {
+	if key == "REDIS_DB" {
+		return strconv.Itoa(n)
+	}
+	// Guarded by redisIndex: a URL that parsed there parses here.
+	u, _ := url.Parse(strings.TrimSpace(val))
+	u.Path = "/" + strconv.Itoa(n)
+	return u.String()
+}
+
+// redisByDir extracts every Redis declaration in a worktree keyed by its dir
+// relative to that worktree's root — portsByDir's shape, so main's dirs map onto
+// ours. Values stay raw because the rewrite has to preserve them.
+func redisByDir(w Worktree) map[string]map[string]string {
+	byDir := map[string]map[string]string{}
+	for rel, vars := range w.EnvVarsByDir() {
+		for key, val := range vars {
+			if _, ok := redisIndex(key, val); ok {
+				if byDir[rel] == nil {
+					byDir[rel] = map[string]string{}
+				}
+				byDir[rel][key] = val
+			}
+		}
+	}
+	return byDir
+}
+
+// freeRedisDB picks this worktree's logical db: derived from the slug so the
+// same branch always lands on the same one, then walked forward until it is free
+// — "free" meaning no worktree in the registry declares it, exactly as E3 reads
+// free for ports. Nothing connects to Redis to find out.
+//
+// ponytail: 16 logical dbs is a real ceiling, not a theoretical one — E3's 200
+// offsets never run out, this runs out at roughly 15 worktrees. Exhaustion is a
+// skip line and never a failed hydrate, because this is a cache. Past 16, give
+// each worktree its own Redis instance (on a port E3 already derives) or a key
+// prefix; both are bigger changes than treehouse should make on its own.
+//
+// ponytail: one index for the WHOLE worktree, so services main deliberately
+// splits across dbs get merged onto one here. 16 cannot afford per-service
+// indexes — a single 4-worktree fleet would exhaust them.
+func freeRedisDB(slug string, registry []Worktree) (int, bool) {
+	used := map[int]bool{}
+	for _, o := range registry {
+		for _, keys := range redisByDir(o) {
+			for key, val := range keys {
+				if n, ok := redisIndex(key, val); ok {
+					used[n] = true
+				}
+			}
+		}
+	}
+
+	h := fnv.New32a()
+	h.Write([]byte(slug))
+	first := int(h.Sum32() % redisSpread)
+
+	for i := 0; i < redisSpread; i++ {
+		if n := (first + i) % redisSpread; !used[n] {
+			return n, true
+		}
+	}
+	return 0, false
 }

@@ -1,6 +1,7 @@
 package check
 
 import (
+	"net/url"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -529,6 +530,215 @@ func TestPlanDeriveDBKeepsPorts(t *testing.T) {
 	}
 	if !strings.Contains(repairs[0].Skip, "port offset") || !strings.Contains(repairs[0].Skip, "DATABASE_URL") {
 		t.Errorf("one reason erased the other: %q", repairs[0].Skip)
+	}
+}
+
+// TestPlanDeriveRedis is A6: this worktree's Redis declarations point at a
+// logical db of its own. The URL cases are why redisIndex uses net/url — an @ in
+// the password and a ?query after the db are both things a regex gets wrong.
+func TestPlanDeriveRedis(t *testing.T) {
+	cases := []struct {
+		name    string
+		vars    map[string]string
+		wantURL string // <db> is the derived index; "" = REDIS_URL must not be written
+		wantDB  bool   // REDIS_DB must be written
+	}{
+		{
+			name:    "a url naming a db",
+			vars:    map[string]string{"REDIS_URL": "redis://localhost:6379/0"},
+			wantURL: "redis://localhost:6379/<db>",
+		},
+		{
+			// The @ inside the password is what makes a regex eat the wrong half;
+			// the query is what it mistakes for part of the db number.
+			name:    "auth and query params survive the rewrite",
+			vars:    map[string]string{"REDIS_URL": "redis://user:p@ss@localhost:6379/0?dial_timeout=5s"},
+			wantURL: "redis://user:p%40ss@localhost:6379/<db>?dial_timeout=5s",
+		},
+		{
+			name:    "no path is db 0, and still gets its own",
+			vars:    map[string]string{"REDIS_URL": "redis://localhost:6379"},
+			wantURL: "redis://localhost:6379/<db>",
+		},
+		{
+			name:    "tls scheme",
+			vars:    map[string]string{"REDIS_URL": "rediss://cache.internal:6380/1"},
+			wantURL: "rediss://cache.internal:6380/<db>",
+		},
+		{
+			name:   "REDIS_DB alone",
+			vars:   map[string]string{"REDIS_DB": "0"},
+			wantDB: true,
+		},
+		{
+			name:    "both keys present move together",
+			vars:    map[string]string{"REDIS_URL": "redis://localhost:6379/0", "REDIS_DB": "0"},
+			wantURL: "redis://localhost:6379/<db>",
+			wantDB:  true,
+		},
+		{
+			name: "not a redis URL: nothing to derive",
+			vars: map[string]string{"REDIS_URL": "http://localhost:6379/0"},
+		},
+		{
+			// Nothing to check is not the same as couldn't check: a repo with no
+			// Redis gets no rows AND no skip line.
+			name: "neither key: nothing to do",
+			vars: map[string]string{"PORT": "3000"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			source := Worktree{Root: "/main", EnvFiles: []envfile.File{{Path: "/main/.env", Vars: c.vars}}}
+			in := DeriveInput{App: "app", Slug: "feat_x"}
+
+			var got Repair
+			for _, r := range (Doctor{}).PlanDerive(Worktree{Root: "/wt"}, source, in) {
+				if r.EnvPath == "/wt/.env" {
+					got = r
+				}
+				if strings.Contains(r.Skip, "Redis") {
+					t.Errorf("%s: unexpected Redis skip: %s", r.EnvPath, r.Skip)
+				}
+			}
+
+			n, ok := redisOut(t, got)
+			if want := c.wantURL != "" || c.wantDB; ok != want {
+				t.Fatalf("wrote Redis keys: %v, want %v (%v)", ok, want, got.Add)
+			}
+			if !ok {
+				return
+			}
+			if n < 0 || n >= redisSpread {
+				t.Errorf("derived db %d is outside Redis's 0–15", n)
+			}
+			// main is in the registry, so whatever main sits on is off limits.
+			for key, val := range c.vars {
+				if m, isRedis := redisIndex(key, val); isRedis && m == n {
+					t.Errorf("derived db %d is the one main declares in %s", n, key)
+				}
+			}
+			if want := strings.ReplaceAll(c.wantURL, "<db>", strconv.Itoa(n)); c.wantURL != "" && got.Add["REDIS_URL"] != want {
+				t.Errorf("REDIS_URL = %q, want %q", got.Add["REDIS_URL"], want)
+			}
+			if _, wrote := got.Add["REDIS_URL"]; wrote != (c.wantURL != "") {
+				t.Errorf("REDIS_URL written: %v, want %v", wrote, c.wantURL != "")
+			}
+			if _, wrote := got.Add["REDIS_DB"]; wrote != c.wantDB {
+				t.Errorf("REDIS_DB written: %v, want %v", wrote, c.wantDB)
+			}
+		})
+	}
+}
+
+// redisOut reads the logical db a repair landed on, and reports whether it wrote
+// any Redis key at all. Both keys must agree — half a repoint points the cache
+// client at one db and the session store at another.
+func redisOut(t *testing.T, r Repair) (int, bool) {
+	t.Helper()
+	n, ok := -1, false
+	if v, wrote := r.Add["REDIS_DB"]; wrote {
+		n, ok = atoiT(t, v), true
+	}
+	if v, wrote := r.Add["REDIS_URL"]; wrote {
+		u, err := url.Parse(v)
+		if err != nil {
+			t.Fatalf("REDIS_URL = %q, which does not parse", v)
+		}
+		m := atoiT(t, strings.TrimPrefix(u.Path, "/"))
+		if ok && m != n {
+			t.Errorf("REDIS_URL names db %d but REDIS_DB names %d", m, n)
+		}
+		n, ok = m, true
+	}
+	return n, ok
+}
+
+// TestPlanDeriveRedisDisjoint is A6's whole job: over a real fleet no branch may
+// land on a logical db main or any sibling already declares, and the same branch
+// must always land on the same one.
+func TestPlanDeriveRedisDisjoint(t *testing.T) {
+	source := Worktree{Root: "/main", EnvFiles: []envfile.File{
+		{Path: "/main/.env", Vars: map[string]string{"REDIS_URL": "redis://localhost:6379/0"}},
+		{Path: "/main/svc_a/.env", Vars: map[string]string{"REDIS_DB": "0"}},
+	}}
+
+	taken := map[int]bool{0: true}
+	var fleet []Worktree
+	// Three siblings already hydrated onto dbs 4, 5 and 6.
+	for i, n := range []int{4, 5, 6} {
+		root := "/wt" + strconv.Itoa(i)
+		taken[n] = true
+		fleet = append(fleet, Worktree{Root: root, EnvFiles: []envfile.File{
+			{Path: root + "/.env", Vars: map[string]string{"REDIS_URL": "redis://localhost:6379/" + strconv.Itoa(n)}},
+			{Path: root + "/svc_a/.env", Vars: map[string]string{"REDIS_DB": strconv.Itoa(n)}},
+		}})
+	}
+
+	for _, branch := range []string{"feat/login", "feat/logout", "main", "x", "", "release/1.0", "a", "b", "功能"} {
+		in := DeriveInput{App: "app", Slug: Slug(branch), Fleet: fleet}
+		repairs := Doctor{}.PlanDerive(Worktree{Root: "/wt"}, source, in)
+
+		var dbs []int
+		for _, r := range repairs {
+			if r.Skip != "" {
+				t.Fatalf("%q: unexpected exhaustion with only 4 worktrees: %s", branch, r.Skip)
+			}
+			if n, ok := redisOut(t, r); ok {
+				if taken[n] {
+					t.Errorf("%q: %s landed on db %d, which the fleet already declares", branch, r.EnvPath, n)
+				}
+				dbs = append(dbs, n)
+			}
+		}
+		if len(dbs) != 2 {
+			t.Fatalf("%q: %d dirs got a Redis db, want 2", branch, len(dbs))
+		}
+		if dbs[0] != dbs[1] {
+			t.Errorf("%q: services split across dbs %d and %d — one worktree, one db", branch, dbs[0], dbs[1])
+		}
+		// Determinism: a db that moves between runs invalidates the cache it was
+		// supposed to protect, every hydrate.
+		if second := (Doctor{}).PlanDerive(Worktree{Root: "/wt"}, source, in); !reflect.DeepEqual(repairs, second) {
+			t.Errorf("%q: the Redis db is not deterministic", branch)
+		}
+	}
+}
+
+// TestPlanDeriveRedisExhausted: 16 logical dbs is a ceiling a real fleet can hit.
+// Hitting it is a skip line — never a failed hydrate, and never at E2's expense.
+func TestPlanDeriveRedisExhausted(t *testing.T) {
+	source := Worktree{Root: "/main", EnvFiles: []envfile.File{
+		{Path: "/main/.env", Vars: map[string]string{"REDIS_URL": "redis://localhost:6379/0"}},
+	}}
+	// One sibling holding every remaining db, one per service dir.
+	var files []envfile.File
+	for n := 1; n < redisSpread; n++ {
+		dir := "/wt2/s" + strconv.Itoa(n)
+		files = append(files, envfile.File{Path: dir + "/.env", Vars: map[string]string{"REDIS_DB": strconv.Itoa(n)}})
+	}
+	fleet := []Worktree{{Root: "/wt2", EnvFiles: files}}
+	w := Worktree{Root: "/wt", ComposeDirs: []string{"/wt"}}
+
+	repairs := Doctor{}.PlanDerive(w, source, DeriveInput{App: "app", Slug: "feat_x", Fleet: fleet})
+
+	skipped := 0
+	for _, r := range repairs {
+		if strings.Contains(r.Skip, "Redis") {
+			skipped++
+		}
+		for key := range r.Add {
+			if strings.HasPrefix(key, "REDIS_") {
+				t.Errorf("%s: wrote %s with no free logical db", r.EnvPath, key)
+			}
+		}
+	}
+	if skipped != 1 {
+		t.Errorf("%d repairs report the Redis skip, want exactly 1", skipped)
+	}
+	if repairs[0].Add["COMPOSE_PROJECT_NAME"] != "app_feat_x" {
+		t.Errorf("a Redis skip dropped E2: %v", repairs[0].Add)
 	}
 }
 

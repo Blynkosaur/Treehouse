@@ -40,15 +40,14 @@ Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`, `gc`, 
 
 | Status | Stories |
 | --- | --- |
-| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **L1** (`new`, `open` hook included), **L2** (`ls`), **L3** (`rm`, database and compose teardown included), **L4** (`th path` + the documented shell function), **B1** (`triage`, three modes, `connection refused` corroborated), **C2** (doctor, dead-service and stale-base checks included), **T1** (live TUI dashboard) |
+| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **A6** (redis logical db), **L1** (`new`, `open` hook included), **L2** (`ls`), **L3** (`rm`, database and compose teardown included), **L4** (`th path` + the documented shell function), **B1** (`triage`, three modes, `connection refused` corroborated), **C2** (doctor, dead-service and stale-base checks included), **T1** (live TUI dashboard) |
 | 🟡 **Partial** | **A3** (migration state, with `diverged` cut from the AC — see below), **B2** + **C4** (both hooks built and tested; the Claude Code wiring is unverified — see B2) |
-| ⬜ **Not started** | **A6** (redis) |
 | ✂️ **Cut** | **C5**'s `.env.example`/compose scan (inference is live; a generated copy goes stale and wins), **C3** (`snapshot` — `make` is the same command with a different filename) |
 | ✂️ **Deferred** | **B3** (`why` — needs the one state file this project has refused everywhere else; see B3) |
 
 Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktrees`/`Ref` (one porcelain parser), `EnvVarsByDir`, `Slug` (collision-safe branch → identifier), `Status` (one worktree, no I/O — the row a TUI renders), the plan-then-apply pattern (`Finding`/`Repair`/`DepPlan`/`DBPlan`/`DBDrop`/`OpenPlan`), `Check` (the non-env verdict beside `Finding`), `Triage` (the same correlation, pure), and `treehouse.toml` config parsing with one generic name-keyed `Merge` — now serving four lists (`[[deps]]`, `[[seed]]`, `[[signature]]`, `[[service]]`).
 
-**Pain coverage so far:** pain 1 (missing `.env`) via C1/hydrate; pains 2 & 9 (deps reinstall + disk) via E1; **pain 3 (shared database, colliding migrations) via A1/A2/A3/A4**; pain 4 (port fights) via E3; pain 5 (compose collisions) via E2; **pain 6 (stale base) via L1's fetch-then-cut and C2's `base` check**; pain 7 (worktree confusion) via L2 and `th path`; **pain 8 (cruft) via L3 + A5**; pain 13's agent half via B1/B2 (an agent no longer debugs phantom code bugs caused by a broken environment, and `connection refused` now reaches a verdict instead of a shrug). Pains 10–12 still open.
+**Pain coverage so far:** pain 1 (missing `.env`) via C1/hydrate; pains 2 & 9 (deps reinstall + disk) via E1; **pain 3 (shared database, colliding migrations) via A1/A2/A3/A4**; pain 4 (port fights) via E3; pain 5 (compose collisions) via E2, and A6 for its cache twin (a flush in one worktree no longer takes out another's sessions); **pain 6 (stale base) via L1's fetch-then-cut and C2's `base` check**; pain 7 (worktree confusion) via L2 and `th path`; **pain 8 (cruft) via L3 + A5**; pain 13's agent half via B1/B2 (an agent no longer debugs phantom code bugs caused by a broken environment, and `connection refused` now reaches a verdict instead of a shrug). Pains 10–12 still open.
 
 ---
 
@@ -114,7 +113,9 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
 
 **A6. Redis isolation ➕ (stretch).** Each worktree gets its own Redis logical db (`redis://localhost:6379/<n>`), so one worktree's cache flush doesn't nuke another's session.
 
-- ⬜ **Not started, and deliberately untouched (2026-07-26).** The only ➕ story left. Nothing about it is blocked — a logical db index is a derived value exactly like a port offset, and it would land in `PlanDerive` beside E3 — it simply has not been asked for by anybody yet.
+- ✅ **Done (2026-07-26).** A fourth derived value in the same `PlanDerive` pass as E2/E3/A2, not a phase of its own. Discovery is main's `REDIS_URL`/`REDIS_DB`; assignment is the **same predicate E3 uses for ports** — derived from the slug, so a branch always lands on the same db, and disjoint from every db main and its siblings already declare. The registry is `DeriveInput.Fleet`, the sibling `.env` files themselves; there is no second registry and no state file. `REDIS_URL` goes through `net/url`, never a regex: credentials before the host and `?query` after the db are exactly what a pattern mangles, and an empty path is db 0, which is what a client defaults to. Nothing connects to Redis.
+- **The ceiling is real and it is 16.** Redis ships `databases 16` (0–15) and main holds one, so the fleet tops out around 15 worktrees — unlike E3's 200 port offsets, which no laptop exhausts. Exhaustion is a **skip line, never a failed hydrate**, because this is a cache; the upgrade path is a separate Redis instance per worktree (on a port E3 already derives) or a key prefix, and both are bigger changes than treehouse should make unasked. A related deliberate collapse: **one db per worktree, not per service**, so services main splits across dbs are merged — 16 cannot afford the alternative.
+- **A repo with no Redis gets no rows and no skip.** "Nothing to check" is not "couldn't check", the same rule that keeps a repo declaring no database from growing a `db` row.
 
 ---
 

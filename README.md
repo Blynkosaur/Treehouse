@@ -482,10 +482,11 @@ reaches the model.
 ## Per-worktree isolation
 
 Each worktree gets `COMPOSE_PROJECT_NAME=<app>_<slug>` in the `.env` of every
-directory that actually holds a compose file, and a deterministic port offset
-applied to every `PORT`/`*_PORT` key the main checkout declares. The registry is
-the sibling `.env` files themselves, so there is no state file to
-garbage-collect.
+directory that actually holds a compose file, a deterministic port offset
+applied to every `PORT`/`*_PORT` key the main checkout declares, and its own
+Redis logical db written into every `REDIS_URL`/`REDIS_DB` the main checkout
+declares. The registry is the sibling `.env` files themselves, so there is no
+state file to garbage-collect.
 
 The offset is derived from the branch name, so the same branch normally lands on
 the same ports — but that is **not** a guarantee over time. The offset has to
@@ -506,3 +507,15 @@ claims: a half-hydrated worktree still carries main's project name, and tearing
 about a different branch. It is `down`, never `down -v`, because volumes are
 data. No docker, no daemon, or a project that was never started: all silent, and
 none of them can fail a `th rm`.
+
+Redis works the same way, with one difference that matters: **Redis ships 16
+logical dbs (0–15) and that is the whole supply.** Main sits on one of them —
+db 0 by convention, and by default when a URL carries no path — so the fleet
+ceiling is roughly 15 worktrees, which a busy laptop can genuinely reach.
+Running out is a skip line in `hydrate`, never a failure: it is a cache. Past
+16, give each worktree its own Redis instance (on a port treehouse already
+derives) or prefix your keys. `REDIS_URL` is parsed as a URL, so credentials,
+a TLS `rediss://` scheme and `?query` parameters all survive the rewrite —
+only the db number moves. One db covers the **whole** worktree: services main
+deliberately splits across separate dbs are merged onto one here, because 16
+cannot afford a db per service per worktree.
