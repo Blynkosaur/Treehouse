@@ -116,6 +116,105 @@ func TestVerdict(t *testing.T) {
 	}
 }
 
+// tiers is the ordering written out independently of checks.go's rank map, so a
+// re-ranking has to be made in two places rather than sliding through one. skip
+// sits between ok and warn: "nobody asked" is not a pass, and a known problem
+// beats an unknown one.
+var tiers = []string{"ok", skip, "warn", "fail"}
+
+// TestFoldsAgreeOnEveryCombination is the exhaustive version of TestVerdict.
+// skip was inserted into an ordering every status fold in the program depends
+// on, so every pair has to be checked rather than the handful anyone thought of
+// — including the pairs that cross the two lists Verdict folds and the two
+// Fleet folds.
+func TestFoldsAgreeOnEveryCombination(t *testing.T) {
+	// The three words findings can produce. skip is deliberately absent: an env
+	// finding is always answerable, which is why EnvStatus has only three tiers.
+	envAt := map[string][]Finding{
+		"ok":   {{Dir: "/a", Keys: 1}},
+		"warn": {{Dir: "/a", Missing: []string{"K"}}},
+		"fail": {{Dir: "/a", Missing: []string{"K"}, Failed: []string{"K"}}},
+	}
+
+	for i, a := range tiers {
+		for j, b := range tiers {
+			want := tiers[max(i, j)]
+
+			// Two checks in one list, both orders — a fold that took the LAST word
+			// instead of the worst would pass one and fail the other.
+			for _, checks := range [][]Check{
+				{{Name: "x", Status: a}, {Name: "y", Status: b}},
+				{{Name: "y", Status: b}, {Name: "x", Status: a}},
+			} {
+				if got := Verdict(nil, checks); got != want {
+					t.Errorf("Verdict(nil, %v) = %q, want %q", checks, got, want)
+				}
+			}
+			// Across Fleet's two lists, and across its rows.
+			if got := Fleet([]Status{{Status: a}}, []Check{{Name: "config", Status: b}}); got != want {
+				t.Errorf("Fleet(row %q, repo %q) = %q, want %q", a, b, got, want)
+			}
+			if got := Fleet([]Status{{Status: a}, {Status: b}}, nil); got != want {
+				t.Errorf("Fleet(rows %q, %q) = %q, want %q", a, b, got, want)
+			}
+		}
+	}
+
+	// Findings crossed with checks: the env half has no skip tier, so this is
+	// where a skipped check has to survive next to a green env.
+	for env, findings := range envAt {
+		for j, c := range tiers {
+			want := tiers[max(slicesIndex(tiers, env), j)]
+			if got := Verdict(findings, []Check{{Name: "db", Status: c}}); got != want {
+				t.Errorf("Verdict(env %q, check %q) = %q, want %q", env, c, got, want)
+			}
+		}
+	}
+
+	// An empty report is the one case that may answer ok, because there was
+	// nothing to be unsure about.
+	if got := Verdict(nil, nil); got != "ok" {
+		t.Errorf("Verdict(nil, nil) = %q, want ok", got)
+	}
+	if got := Fleet(nil, nil); got != "ok" {
+		t.Errorf("Fleet(nil, nil) = %q, want ok", got)
+	}
+}
+
+// TestNothingMadeOfSkipsIsGreen is the property stated on its own, because it is
+// the one an agent's exit-code gate depends on: a report where every single
+// answer was "could not ask" must never come back ok, however many of them there
+// are and whichever list they arrive in.
+func TestNothingMadeOfSkipsIsGreen(t *testing.T) {
+	for n := 1; n <= 4; n++ {
+		checks := make([]Check, n)
+		rows := make([]Status, n)
+		for i := range checks {
+			checks[i] = Check{Name: "db", Status: skip}
+			rows[i] = Status{Status: skip}
+		}
+		if got := Verdict(nil, checks); got != skip {
+			t.Errorf("Verdict over %d skips = %q, want skip", n, got)
+		}
+		if got := Fleet(rows, checks); got != skip {
+			t.Errorf("Fleet over %d skipped rows = %q, want skip", n, got)
+		}
+		// A clean env beside them must not vote the report green either.
+		if got := Verdict([]Finding{{Dir: "/a", Keys: 1}}, checks); got != skip {
+			t.Errorf("Verdict(clean env, %d skips) = %q, want skip", n, got)
+		}
+	}
+}
+
+func slicesIndex(haystack []string, needle string) int {
+	for i, s := range haystack {
+		if s == needle {
+			return i
+		}
+	}
+	return -1
+}
+
 // TestStatusDBColumn is ITEM 1's regression. The column used to answer
 // clone-exists only, so a worktree whose clone existed while its .env still
 // named the SHARED database read `db: ok` in the glance view — green, in the
@@ -168,6 +267,44 @@ func TestStatusDBColumn(t *testing.T) {
 				t.Errorf("Status = %q, want %q — this is the field `ls --json` exits on", got.Status, c.wantStatus)
 			}
 		})
+	}
+}
+
+// TestDetachedWorktreeAgreesWithDoctor is left failing, and the reason is that
+// two stated intents collide — this is a call for whoever owns the design, not
+// a patch.
+//
+// Standing in a detached worktree, `th doctor` reports `db: skip` ("detached
+// HEAD — no stable name for a database clone") and a `skip` verdict. `th ls`
+// answers the same worktree with a blank db column and `ok`, because Status
+// guards the whole database question behind `ref.Branch != ""` and never asks
+// PlanDB at all. Verified end to end against a live cluster.
+//
+// One intent says the two commands may never publish different `status` words
+// for one worktree. The other is the case below marked "detached worktree never
+// had one", which says the blank is correct. They cannot both hold.
+//
+// The fix, if the first intent wins, is to let PlanDB answer instead of
+// short-circuiting: pass Slug(ref.Branch) or "" (Slug("") is a HASH, not "",
+// which is why the guard is there) and tighten Main to `ref.Branch != "" &&
+// ref.Branch == d.MainBranch` — otherwise, with a detached MAIN, MainBranch is
+// "" and every detached worktree in the fleet reports itself as the main
+// checkout.
+func TestDetachedWorktreeAgreesWithDoctor(t *testing.T) {
+	t.Skip("BUG: `th ls` says ok for a detached worktree that `th doctor` says skip")
+
+	source := Worktree{Root: "/main", EnvFiles: []envfile.File{
+		{Path: "/main/.env", Vars: map[string]string{"DATABASE_URL": "postgres://h/app_dev"}},
+	}}
+	d := Doctor{Databases: []string{"app_dev"}, MainBranch: "main"}
+	got := d.Status(Worktree{Root: "/w"}, Ref{Path: "/w"}, source)
+
+	// What doctor says about the very same worktree.
+	want := Verdict(nil, []Check{d.CheckDB(DBState{Plan: d.PlanDB(DBInput{
+		Template: "app_dev", Existing: d.Databases,
+	})})})
+	if got.Status != want {
+		t.Errorf("ls says %q, doctor says %q about one detached worktree", got.Status, want)
 	}
 }
 

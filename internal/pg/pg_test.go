@@ -125,6 +125,136 @@ func TestQuotedNamesSurviveTheCluster(t *testing.T) {
 	}
 }
 
+// TestHostileNamesNameTheRightDatabase is the security boundary of this change,
+// live. Refusing a name is safe by construction; QUOTING one is only safe if
+// Postgres reads back exactly the name we meant. So each of these is created,
+// then looked for BYTE FOR BYTE in pg_database — a name that came back different
+// is a clone treehouse can never find again, and a `th hydrate` that recreates
+// it forever.
+//
+// The maintenance and template databases are re-checked after every single one:
+// these are the shapes that close an identifier and run what follows, and the
+// only proof that doubling holds is that they are all still standing.
+func TestHostileNamesNameTheRightDatabase(t *testing.T) {
+	skipWithoutCluster(t)
+	for _, name := range []string{
+		`"""`,                              // nothing but quotes
+		`a"";DROP DATABASE postgres;--`,    // a doubled quote, pre-escaped by the attacker
+		`x"; DROP DATABASE "postgres"; --`, // the fully-formed attempt
+		`app\db`,                           // a backslash, which quoted identifiers do not escape
+		"app$$db",                          // dollar quoting, which is a LITERAL construct
+		"app'db",                           // a single quote: a literal delimiter, not an identifier one
+		"app--db",                          // a SQL comment opener
+		"app;db",                           // a statement separator
+		"täst-db",                          // multi-byte
+		strings.Repeat("d", 63),            // exactly the cap
+		strings.Repeat("ä", 31) + "d",      // 63 BYTES of multi-byte, which is what Postgres counts
+	} {
+		t.Run(name, func(t *testing.T) {
+			_ = Drop(name)
+			t.Cleanup(func() { _ = Drop(name) })
+
+			if err := Create(name, "template1"); err != nil {
+				t.Fatalf("Create(%q): %v", name, err)
+			}
+			names, err := Databases()
+			if err != nil {
+				t.Fatalf("Databases: %v", err)
+			}
+			// The whole point: what we asked for is what exists. PlanDB decides
+			// "this clone already exists" by comparing these strings, so a name that
+			// came back mangled means .env is pointed at a database nobody planned.
+			if !contains(names, name) {
+				t.Fatalf("Create(%q) made something else: %v", name, names)
+			}
+			for _, survivor := range []string{"postgres", "template1"} {
+				if !contains(names, survivor) {
+					t.Fatalf("%q took out %q — the quoting did not hold", name, survivor)
+				}
+			}
+			// Every other entry point interpolates the same identifier, so each has
+			// to survive it too, not just CREATE.
+			if err := Comment(name, "treehouse:/tmp/repo:feat/a"); err != nil {
+				t.Errorf("Comment(%q): %v", name, err)
+			}
+			dbs, err := Commented()
+			if err != nil {
+				t.Fatalf("Commented: %v", err)
+			}
+			found := false
+			for _, db := range dbs {
+				if db.Name == name {
+					found = true
+					if db.Comment != "treehouse:/tmp/repo:feat/a" {
+						t.Errorf("provenance came back %q", db.Comment)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("Commented lost %q — gc would never see this clone", name)
+			}
+			if _, err := Sessions(name); err != nil {
+				t.Errorf("Sessions(%q): %v", name, err)
+			}
+			if err := MarkSeed(name, "ramp"); err != nil {
+				t.Errorf("MarkSeed(%q): %v", name, err)
+			}
+			if seeds, err := Seeds(name); err != nil || len(seeds) != 1 {
+				t.Errorf("Seeds(%q) = %v, %v — the marker went into another database", name, seeds, err)
+			}
+			if err := Drop(name); err != nil {
+				t.Fatalf("Drop(%q): %v", name, err)
+			}
+			if names, err = Databases(); err != nil || contains(names, name) {
+				t.Errorf("Drop(%q) left it behind", name)
+			}
+			if !contains(names, "postgres") {
+				t.Fatalf("Drop(%q) took out the maintenance database", name)
+			}
+		})
+	}
+}
+
+// TestClonedNameSurvivesTheClusterVerbatim closes the loop between the planner
+// and the server: check.DBName derives a name, Postgres stores it, and PlanDB
+// decides whether to create a clone by comparing those two strings. If the
+// server folds or truncates anything, Exists is false forever and hydrate
+// re-clones on every run.
+func TestClonedNameSurvivesTheClusterVerbatim(t *testing.T) {
+	skipWithoutCluster(t)
+	for _, template := range []string{"th-selftest-app", "THSelfTest", "täst_selftest"} {
+		t.Run(template, func(t *testing.T) {
+			name := check.DBName(template, check.Slug("feat/login"))
+			_ = Drop(name)
+			t.Cleanup(func() { _ = Drop(name) })
+
+			if err := Create(name, "template1"); err != nil {
+				t.Fatalf("Create(%q): %v", name, err)
+			}
+			names, err := Databases()
+			if err != nil {
+				t.Fatalf("Databases: %v", err)
+			}
+			plan := check.Doctor{}.PlanDB(check.DBInput{
+				Template: template, Existing: names, Slug: check.Slug("feat/login"),
+			})
+			if plan.Name != name {
+				t.Fatalf("PlanDB named %q, we created %q", plan.Name, name)
+			}
+			if !plan.Exists {
+				t.Errorf("PlanDB cannot see the clone it named — hydrate would create it again forever")
+			}
+		})
+	}
+}
+
+func skipWithoutCluster(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("pg_isready").Run(); err != nil {
+		t.Skip("no postgres server responding")
+	}
+}
+
 // TestCloneRoundTrip is the only test that needs a real cluster, and it skips
 // cleanly without one — the same bargain internal/deps makes with `cp`.
 func TestCloneRoundTrip(t *testing.T) {
