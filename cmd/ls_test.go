@@ -154,3 +154,37 @@ func TestLsSeesTheSharedDatabase(t *testing.T) {
 		t.Errorf("doctor exit %d while ls said fail", docCode)
 	}
 }
+
+// TestPath is L4's command half: `cd "$(th path <branch>)"` has to be safe to
+// paste into a shell, which means exactly one line on stdout and a non-zero
+// exit — never a path — when the branch has no worktree.
+func TestPath(t *testing.T) {
+	main := mainRepo(t)
+	if out, ok := runTh(t, main, "new", "jump", "--skip-deps"); !ok {
+		t.Fatalf("%s", out)
+	}
+
+	out, errOut, code := runSplit(t, main, "path", "jump")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	// Resolved on both sides: git reports /private/var where the test's TempDir
+	// says /var, and that difference is the OS's, not the command's.
+	got, _ := filepath.EvalSymlinks(strings.TrimSpace(out))
+	want, _ := filepath.EvalSymlinks(filepath.Join(filepath.Dir(main), "app-jump"))
+	if got != want || want == "" {
+		t.Errorf("path = %q, want %q", got, want)
+	}
+	if strings.Count(strings.TrimSpace(out), "\n") != 0 {
+		t.Errorf("stdout must be the path alone, got:\n%s", out)
+	}
+
+	// The failure that matters: a `cd` to a printed nothing lands in $HOME.
+	out, _, code = runSplit(t, main, "path", "nope")
+	if code == 0 {
+		t.Errorf("an unknown branch must not exit 0")
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("an unknown branch printed %q on stdout", out)
+	}
+}
