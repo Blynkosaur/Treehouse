@@ -173,6 +173,42 @@ func worse(a, b string) string {
 	return a
 }
 
+// OpenPlan is what `th new` does with a worktree once it is built: L1's
+// optional hand-off to an editor or an agent.
+type OpenPlan struct {
+	Command string // run this with the worktree as cwd; "" = do nothing
+	Skip    string // why not, when the reader deserves to hear it; "" = say nothing
+}
+
+// PlanOpen decides whether the hand-off fires.
+//
+// The FAIL guard is the whole point of "born ready": handing somebody a
+// worktree whose database is pointed at the shared one, or whose curated
+// required keys are missing, is worse than handing them nothing — they will
+// start working in it before they read the report scrolling past above the
+// editor. Warnings do NOT block, deliberately: inferred env drift and a dead
+// port are the normal state of a repo you have not run yet, and a hand-off that
+// almost never fires is a hand-off nobody configures.
+//
+// Silence is the default at every step. An unconfigured repo says nothing,
+// because most repos have no opinion here and a nag per `th new` is how a good
+// flag gets turned off.
+func PlanOpen(command, verdict string, force, refuse bool) OpenPlan {
+	switch {
+	case refuse:
+		return OpenPlan{} // --no-open: the human already said no, so no commentary
+	case command == "" && force:
+		// --open asked for something that does not exist. This one is worth
+		// saying: the flag did nothing, and silence looks like it worked.
+		return OpenPlan{Skip: "no [open] command configured in treehouse.toml"}
+	case command == "":
+		return OpenPlan{}
+	case verdict == "fail" && !force:
+		return OpenPlan{Skip: "doctor reported a failure — not handing over a broken worktree (--open overrides)"}
+	}
+	return OpenPlan{Command: command}
+}
+
 // Verdict folds env findings and checks into the one word the exit code, the
 // --json envelope and the ls column all agree on. Inferred drift warns; a
 // curated required key and a worktree pointed at the shared database fail; a
