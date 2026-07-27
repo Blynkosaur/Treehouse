@@ -54,8 +54,22 @@ func fleet(cwd string) ([]check.Ref, check.Worktree, check.Doctor, error) {
 	// per row, and a table people run to glance at cannot also run somebody's
 	// migration tooling. Unreachable Postgres leaves the column blank rather than
 	// failing the command.
+	//
+	// But blank means "never asked", and an unreachable cluster is "asked and got
+	// nothing" — the same distinction doctor draws with its skip row. Folding the
+	// second into the first made `th ls --json` answer `status: ok` for the very
+	// worktree `th doctor --json` called `skip`, which is the whole failure this
+	// pass exists to remove. It goes in as a REPO-wide check because the cluster
+	// is one fact about the repo, not a fact each row rediscovers.
 	if check.EnvDB(source) != "" {
-		d.Databases, _ = pg.Databases()
+		var dbErr error
+		if d.Databases, dbErr = pg.Databases(); dbErr != nil {
+			d.Repo = append(d.Repo, check.Check{
+				Name:   "db",
+				Status: "skip",
+				Detail: "postgres is not reachable: " + oneLine(dbErr),
+			})
+		}
 	}
 	return refs, source, d, nil
 }
