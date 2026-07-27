@@ -448,34 +448,41 @@ function tcd; cd (th path $argv[1]); end
 `th path` also completes branch names, so `th path <TAB>` offers the worktrees
 you have (`th completion zsh`/`bash`/`fish` installs it the usual way).
 
-## Claude Code hooks (UNVERIFIED — read this before pasting)
+## Claude Code hooks (verified 2026-07-27)
 
-Two hooks: one hands an agent the worktree's state at session start, the other
-explains a failing Bash command while it is still on screen.
+Two hooks. **One works, one is limited by something Claude Code does not
+expose**, and both facts below come from a watched `claude --debug` run, not
+from reading source.
 
-**The code is tested; the wiring is not.** The block below was written from
-first-party hook source, not from a run that was watched end to end. Four things
-are unconfirmed, and the first one decides whether the `PostToolUse` half works
-at all:
+**`SessionStart` works.** `th hook session` fires on `startup`, its JSON is
+parsed and validated, and the context is injected — an agent begins knowing
+this worktree's env and database state.
 
-1. **Does `PostToolUse` fire when a Bash tool call *errors*?** If it only fires
-   on success, the failure hook is dead as designed and has to move to a
-   `UserPromptSubmit` shape. Check this first.
-2. Does `additionalContext` from `PostToolUse` actually reach the model, or only
-   the transcript?
-3. The exact `.claude/settings.json` nesting below.
-4. Which `SessionStart` `source` values should trigger the session hook —
-   probably `startup` only, but `resume`/`clear`/`compact` are untested. That is
-   why `th hook session` does not filter by source itself: the matcher below is
-   where you decide, and you can see it.
+**`PostToolUse` never fires when a Bash call errors.** Verified with a control
+pair in one session: a Bash call ending `outcome=ok` fires the hook and the
+verdict is injected; a Bash call ending `outcome=error` fires nothing at all.
+There is no hook event for a failed tool call, so **the failure hook cannot see
+the failures it was written for.**
 
-One more thing that IS verified and worth knowing: **a Bash `tool_response`
-carries no exit code** — only `stdout`, `stderr` and `interrupted`. There is no
-"did it fail" to branch on, so the signature map *is* the failure detector. The
-hook runs after every Bash call and exits 0 in silence when nothing matches,
-which is also what makes it silent when the verdict is `code`. It never re-runs
-the command: the output is already in the payload, and re-running would re-run
-your `git push`.
+What still works, and it is not nothing: a command that *succeeds* while
+printing a recognised signature — a test runner that reports connection errors
+and exits 0, a script that logs `relation does not exist` and carries on — is
+triaged normally. That is a real slice of the problem, just not the headline
+one.
+
+**For the headline case, wrap the command instead.** `th triage -- <cmd>` needs
+no hook, sees everything, and passes the exit code through untouched. Tell your
+agent to use it in `CLAUDE.md`:
+
+> When a command fails and you suspect the environment, re-run it as
+> `th triage -- <cmd>` and read the verdict before changing any code.
+
+Also verified, and worth knowing: **a Bash `tool_response` carries no exit
+code** — only `stdout`, `stderr` and `interrupted`. There is no "did it fail" to
+branch on, which is why the signature map *is* the failure detector: the hook
+runs after every successful Bash call and exits 0 in silence when nothing
+matches. It never re-runs the command — the output is already in the payload,
+and re-running would re-run your `git push`.
 
 ```json
 {
