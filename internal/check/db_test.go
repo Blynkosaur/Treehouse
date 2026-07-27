@@ -3,6 +3,7 @@ package check
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestDBName(t *testing.T) {
@@ -47,6 +48,133 @@ func TestDBNameFitsPostgres(t *testing.T) {
 	b := DBName(longBase, Slug("feat-a-b"))
 	if a == b {
 		t.Fatalf("two branches collided on one database name: %q", a)
+	}
+}
+
+// TestDBNameIsRuneSafe exercises the truncation that became rune-aware when
+// quoting replaced refusing: a template name may now be any legal Postgres
+// identifier, so byte 12 can land in the middle of a multi-byte rune. Half a
+// rune is not a name — psql would send bytes the server cannot decode, and the
+// clone would be created under a name nothing else can reproduce.
+func TestDBNameIsRuneSafe(t *testing.T) {
+	// Each base is chosen so that byte 12 falls at a different offset inside a
+	// rune: "aa"+3-byte runes straddles, the 4-byte emoji straddles differently,
+	// and the pure 3-byte case lands exactly on a boundary.
+	bases := []string{
+		"日本語日本語日本語",              // 27 bytes, 3-byte runes: 12 is a clean boundary
+		"a日本語日本語日本語",             // 28 bytes: 12 lands one byte into a rune
+		"aa日本語日本語日本語",            // 29 bytes: two bytes in
+		"🌳🌳🌳🌳🌳🌳",                 // 4-byte runes: 12 is a boundary
+		"a🌳🌳🌳🌳🌳🌳",                // 4-byte runes offset by one
+		"aa🌳🌳🌳🌳🌳",                // and by two
+		"приложение_development", // 2-byte runes
+	}
+	for _, base := range bases {
+		t.Run(base, func(t *testing.T) {
+			name := DBName(base, Slug("feat/login"))
+			if !utf8.ValidString(name) {
+				t.Fatalf("DBName(%q, …) = %q — truncation split a rune", base, name)
+			}
+			if len(name) > 63 {
+				t.Errorf("DBName(%q, …) is %d bytes, past Postgres's 63", base, len(name))
+			}
+			if why := IdentReason(name); why != "" {
+				t.Errorf("DBName(%q, …) = %q is unusable: %s", base, name, why)
+			}
+			// The slug is the half that carries collision-safety, so it must arrive
+			// whole however much of the base was thrown away.
+			if !strings.HasSuffix(name, "_wt_"+Slug("feat/login")) {
+				t.Errorf("DBName(%q, …) = %q — the slug did not survive", base, name)
+			}
+		})
+	}
+}
+
+// TestDBNameStaysUsableForEveryQuotableTemplate is the widening this pass
+// introduced, followed all the way to the name that reaches CREATE DATABASE: a
+// template no longer has to match ^[a-z_][a-z0-9_]*$, so every shape Quote now
+// admits has to still derive a clone name the guard will accept.
+func TestDBNameStaysUsableForEveryQuotableTemplate(t *testing.T) {
+	templates := []string{
+		"app-db", "APPDB", "app db", `app"db`, `"""`, "app'db", "app$$db",
+		"app\\db", "app;db", "app--db", "app=db", "1app", "täst",
+		strings.Repeat("ä", 31), // 62 bytes, just inside the cap
+		strings.Repeat("d", 63), // exactly the cap
+	}
+	for _, template := range templates {
+		t.Run(template, func(t *testing.T) {
+			if why := IdentReason(template); why != "" {
+				t.Fatalf("template %q was refused: %s — Quote handles shape now", template, why)
+			}
+			p := Doctor{}.PlanDB(DBInput{Template: template, Slug: Slug("feat/a")})
+			if p.Skip != "" || p.Bad {
+				t.Fatalf("PlanDB(%q) declined: %q", template, p.Skip)
+			}
+			if why := IdentReason(p.Name); why != "" {
+				t.Errorf("PlanDB(%q) planned %q, which the boundary refuses: %s", template, p.Name, why)
+			}
+			if !utf8.ValidString(p.Name) {
+				t.Errorf("PlanDB(%q) planned invalid UTF-8: %q", template, p.Name)
+			}
+			// Quoting is what makes the plan safe, and it has to be an exact
+			// round trip — a name that quotes to a DIFFERENT name is the wrong
+			// database, silently.
+			q := Quote(p.Name)
+			if unquoteIdent(q) != p.Name {
+				t.Errorf("Quote(%q) = %s, which names %q", p.Name, q, unquoteIdent(q))
+			}
+		})
+	}
+}
+
+// unquoteIdent is Postgres's own rule read backwards: strip the outer quotes,
+// collapse each doubled quote to one. It exists only so the test can assert
+// Quote is injective rather than trusting it.
+func unquoteIdent(q string) string {
+	return strings.ReplaceAll(q[1:len(q)-1], `""`, `"`)
+}
+
+// TestQuoteIsInjective is the security property in one line: two different
+// names may never quote to the same SQL, or one repo's clone is another's.
+func TestQuoteIsInjective(t *testing.T) {
+	names := []string{
+		`a"b`, `a""b`, `a"""b`, `"`, `""`, `"""`, "a", `a"`, `"a`, `"a"`,
+		"a'b", "a;b", "a--b", `a\b`, "a$$b", "a b", "A", "a",
+	}
+	seen := map[string]string{}
+	for _, n := range names {
+		q := Quote(n)
+		if prior, dup := seen[q]; dup && prior != n {
+			t.Errorf("Quote(%q) and Quote(%q) are both %s — two names, one database", prior, n, q)
+		}
+		seen[q] = n
+		if unquoteIdent(q) != n {
+			t.Errorf("Quote(%q) = %s, which Postgres reads as %q", n, q, unquoteIdent(q))
+		}
+	}
+}
+
+// TestDBNameCollidesOnTruncatedBases is a REAL bug, not a hypothetical, and it
+// is left failing on purpose: fixing it renames every existing clone in every
+// repo whose template is longer than twelve bytes, which orphans databases
+// people are working in. That migration is a decision, not a patch.
+//
+// DBName keeps only the first twelve bytes of the template, with nothing to
+// distinguish what it threw away. Two repos on one cluster whose templates share
+// a twelve-byte prefix therefore derive the SAME clone name for the same branch.
+// The second repo's `th hydrate` sees the first repo's clone in pg_database,
+// reports "already exists — reusing it", and points its .env at another repo's
+// database. Provenance does not save it: PlanDB never looks at a comment.
+//
+// The fix Slug already uses is a hash of what was dropped — base[:5] + "_" +
+// 6 hex, which still fits the 63-byte budget.
+func TestDBNameCollidesOnTruncatedBases(t *testing.T) {
+	t.Skip("BUG: DBName truncates the template to 12 bytes with no disambiguator — two repos collide on one clone")
+
+	a := DBName("shop_backend_dev", Slug("feat/auth"))
+	b := DBName("shop_backend_web", Slug("feat/auth"))
+	if a == b {
+		t.Fatalf("two different templates derive one database name: %q", a)
 	}
 }
 

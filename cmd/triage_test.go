@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Blynkosaur/treehouse/internal/check"
 )
 
 // runTri runs th with stdin attached and stdout/stderr kept APART, because
@@ -408,6 +410,72 @@ func TestHookSession(t *testing.T) {
 			t.Errorf("a green worktree costs %d lines of context; it should cost one plus the tool line:\n%s", n, ctx)
 		}
 	})
+}
+
+// TestSessionLinesNeverReadGreen is the context an agent is handed BEFORE it has
+// done anything, so a green-looking line here is a wrong belief the whole
+// session then reasons from. "(all clear)" is allowed exactly once: when every
+// question was asked and every answer was ok.
+//
+// Driven from struct literals rather than a repo, because the states that matter
+// most — a cluster nobody could reach, a worktree on the shared database — are
+// the ones an end-to-end fixture can only produce with a live Postgres.
+func TestSessionLinesNeverReadGreen(t *testing.T) {
+	clean := []check.Finding{{Dir: "/w", Keys: 1}}
+	drifted := []check.Finding{{Dir: "/w", Missing: []string{"KEY"}}}
+	shared := check.Check{
+		Name:   "db",
+		Status: "fail",
+		Detail: ".env still targets the SHARED database app_dev while this worktree's clone exists",
+		Fix:    "th hydrate",
+	}
+	unreachable := check.Check{Name: "db", Status: "skip", Detail: "postgres is not reachable"}
+
+	cases := []struct {
+		name      string
+		findings  []check.Finding
+		checks    []check.Check
+		wantWord  string
+		allClear  bool
+		mustCarry string
+	}{
+		{"everything verified fine", clean, []check.Check{{Name: "db", Status: "ok", Detail: "own clone"}}, "ok", true, ""},
+		{"nothing to report at all", nil, nil, "ok", true, ""},
+		{"a cluster nobody could reach", clean, []check.Check{unreachable}, "skip", false, "postgres is not reachable"},
+		{"an ok check does not cover for a skipped one", clean,
+			[]check.Check{{Name: "seed", Status: "ok", Detail: "loaded"}, unreachable}, "skip", false, "postgres"},
+		{"the shared database", clean, []check.Check{shared}, "fail", false, "SHARED"},
+		{"the shared database outranks a clean env", clean, []check.Check{shared, unreachable}, "fail", false, "SHARED"},
+		{"env drift alone still warns", drifted, nil, "warn", false, "KEY"},
+		{"a broken repo config", clean,
+			[]check.Check{{Name: "config", Status: "fail", Detail: "could not parse treehouse.toml", Fix: "fix the TOML"}},
+			"fail", false, "treehouse.toml"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := strings.Join(sessionLines(c.findings, c.checks, "/w"), "\n")
+
+			if !strings.Contains(ctx, "environment "+c.wantWord) {
+				t.Errorf("head line does not say %q:\n%s", c.wantWord, ctx)
+			}
+			if got := strings.Contains(ctx, "all clear"); got != c.allClear {
+				t.Errorf("all clear = %v, want %v:\n%s", got, c.allClear, ctx)
+			}
+			if c.mustCarry != "" && !strings.Contains(ctx, c.mustCarry) {
+				t.Errorf("the agent is never told about %q:\n%s", c.mustCarry, ctx)
+			}
+			// Anything short of ok has to point somewhere, or the agent knows it has
+			// a problem and not what to do about it.
+			if c.wantWord != "ok" && !strings.Contains(ctx, "th doctor") {
+				t.Errorf("a non-green verdict with no next step:\n%s", ctx)
+			}
+			// It is prepended to a context window, not printed to a terminal.
+			if n := len(strings.Split(ctx, "\n")); n > 9 {
+				t.Errorf("context is %d lines:\n%s", n, ctx)
+			}
+		})
+	}
 }
 
 // TestTriageSignatureFromConfig: [[signature]] is the same name-keyed extension

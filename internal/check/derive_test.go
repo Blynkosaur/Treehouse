@@ -2,6 +2,8 @@ package check
 
 import (
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -749,4 +751,72 @@ func atoiT(t *testing.T, s string) int {
 		t.Fatalf("not a port number: %q", s)
 	}
 	return n
+}
+
+// TestRepointRoundTripsEveryQuotableName is the end of the chain quoting opened
+// up, and the place a wrong-database bug would actually land.
+//
+// A template no longer has to be [a-z_][a-z0-9_]*, so the clone name derived
+// from it can carry a space, a #, a %, a quote. That name is written into a URL
+// (url.String percent-encodes), through envfile's own quoting (which escapes
+// #, quotes and padding), and read back by Parse and DBFromURL. Every one of
+// those steps can change a string. If any of them does, `.env` names one
+// database, doctor compares against another, and the app dials a third — with
+// no error anywhere, because every layer succeeded at its own job.
+func TestRepointRoundTripsEveryQuotableName(t *testing.T) {
+	templates := []string{
+		"app-db", "APPDB", "app db", `app"db`, "app'db", "app#db", "app%db",
+		"app db#x", "app$$db", `app\db`, "app;db", "täst_db", "app db  ",
+		"app=db", "app?db", "app&db", "app/db", "app@db", "app:db",
+	}
+	for _, template := range templates {
+		t.Run(template, func(t *testing.T) {
+			db := DBName(template, Slug("feat/login"))
+			if why := IdentReason(db); why != "" {
+				t.Fatalf("DBName(%q, …) = %q is unusable: %s", template, db, why)
+			}
+
+			// Both key shapes, because they move together or not at all.
+			for _, vars := range []map[string]string{
+				{"DATABASE_URL": "postgres://u:p@localhost:5432/" + template + "?sslmode=require"},
+				{"POSTGRES_DB": template},
+				{"DATABASE_URL": "postgres://localhost/" + template, "POSTGRES_DB": template},
+			} {
+				add, _, skip := repointDB(vars, db)
+				if skip != "" {
+					t.Fatalf("repointDB declined %v: %s", vars, skip)
+				}
+
+				dir := t.TempDir()
+				path := filepath.Join(dir, ".env")
+				if err := envfile.Create(path, add); err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				// Set is the writer derive actually uses on a second run, and it has
+				// to land on the same bytes — otherwise the value drifts every hydrate.
+				if err := envfile.Set(path, add); err != nil {
+					t.Fatalf("Set: %v", err)
+				}
+
+				f, err := envfile.LoadPath(path)
+				if err != nil {
+					t.Fatalf("LoadPath: %v", err)
+				}
+				got := EnvDB(Worktree{Root: dir, EnvFiles: []envfile.File{f}})
+				if got != db {
+					t.Errorf("wrote %q, .env reads back %q (from %v)\n  file: %q",
+						db, got, add, readEnvFile(t, path))
+				}
+			}
+		})
+	}
+}
+
+func readEnvFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }

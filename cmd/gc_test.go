@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -78,5 +79,135 @@ func TestKeepReason(t *testing.T) {
 				t.Error("a kept database with no reason is a database somebody has to guess about")
 			}
 		})
+	}
+}
+
+// TestGCNeverDropsALiveWorktreesDatabase is the end-to-end version of the one
+// property `th gc` cannot get wrong. The planner is tested from struct
+// literals; this drives the real thing against a real cluster, because the
+// inputs it reads — provenance comments Postgres stored, the .env a worktree
+// actually has on disk — are exactly what a unit test has to invent.
+//
+// The three states below all keep a clone whose worktree is alive. Two of them
+// are ordinary git commands that break the BRANCH link the comment records, and
+// each one used to be enough to make gc offer somebody's working database.
+func TestGCNeverDropsALiveWorktreesDatabase(t *testing.T) {
+	skipWithoutCluster(t)
+	const template = "th_gc_selftest"
+	clusterExec(t, `DROP DATABASE IF EXISTS "`+template+`"`)
+	clusterExec(t, `CREATE DATABASE "`+template+`"`)
+
+	main := gitignoredEnvRepo(t)
+	write(t, filepath.Join(main, ".env.example"), "PORT=\nDATABASE_URL=\n")
+	write(t, filepath.Join(main, ".env"), "PORT=3000\nDATABASE_URL=postgres:///"+template+"\n")
+	git(t, main, "add", "-A")
+	git(t, main, "commit", "-m", "database")
+
+	if out, ok := runTh(t, main, "new", "feat", "--skip-deps"); !ok {
+		t.Fatalf("th new: %s", out)
+	}
+	linked := filepath.Join(filepath.Dir(main), "app-feat")
+	clone := "th_gc_selfte_wt_feat"
+	t.Cleanup(func() {
+		runTh(t, main, "rm", "feat", "--force")
+		clusterExec(t, `DROP DATABASE IF EXISTS "`+clone+`"`)
+		clusterExec(t, `DROP DATABASE IF EXISTS "`+template+`"`)
+	})
+	if !clusterHas(t, clone) {
+		t.Fatalf("th new made no clone named %q — the rest of this test would be vacuous", clone)
+	}
+
+	drops := func(t *testing.T) []string {
+		t.Helper()
+		out, _, code := runSplit(t, main, "gc", "--json")
+		if code != 0 {
+			t.Fatalf("gc exit %d\n%s", code, out)
+		}
+		var got struct {
+			Status string                  `json:"status"`
+			Drops  []struct{ Name string } `json:"drops"`
+		}
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("gc --json: %v\n%s", err, out)
+		}
+		if got.Status != "ok" {
+			t.Fatalf("gc status = %q — the cluster is right there", got.Status)
+		}
+		var names []string
+		for _, d := range got.Drops {
+			names = append(names, d.Name)
+		}
+		return names
+	}
+
+	for _, state := range []struct {
+		name string
+		do   func()
+	}{
+		{"the worktree is on the branch its comment names", func() {}},
+		// `git checkout --detach` is a bisect or a sha checkout. The worktree is
+		// still there, its .env still names the clone, somebody is still in it.
+		{"the worktree detached its HEAD", func() { git(t, linked, "checkout", "--detach") }},
+		// And a rename breaks the link the other way.
+		{"the branch was renamed under it", func() {
+			git(t, linked, "checkout", "-b", "feat-renamed")
+		}},
+	} {
+		t.Run(state.name, func(t *testing.T) {
+			state.do()
+			if names := drops(t); len(names) != 0 {
+				t.Fatalf("gc offered to drop %v while a live worktree's .env names %q", names, clone)
+			}
+			// -y is the door an agent or a script goes through, so the guard has to
+			// hold on the path that actually deletes, not just on the listing.
+			if out, _, code := runSplit(t, main, "gc", "-y"); code != 0 {
+				t.Fatalf("gc -y exit %d\n%s", code, out)
+			}
+			if !clusterHas(t, clone) {
+				t.Fatalf("gc -y dropped %q out from under a live worktree", clone)
+			}
+		})
+	}
+
+	// The positive control: once the worktree is really gone, the clone IS a
+	// corpse and gc has to say so — otherwise every assertion above passes for a
+	// collector that never collects anything.
+	t.Run("and it does collect once the worktree is gone", func(t *testing.T) {
+		// git's own removal, not `th rm`: rm tears the database down itself, which
+		// would prove nothing about gc.
+		git(t, main, "worktree", "remove", "--force", linked)
+		if names := drops(t); len(names) != 1 || names[0] != clone {
+			t.Fatalf("gc = %v, want just %q — a collector that never collects is not one", names, clone)
+		}
+	})
+}
+
+// clusterExec runs one statement against the cluster the tests are pointed at,
+// skipping rather than failing when it cannot — the same bargain internal/pg's
+// live tests make.
+func clusterExec(t *testing.T, sql string) {
+	t.Helper()
+	c := exec.Command("psql", "-d", "postgres", "-At", "--no-psqlrc", "-v", "ON_ERROR_STOP=1")
+	c.Stdin = strings.NewReader(sql)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Skipf("cannot prepare the cluster (%v): %s", err, out)
+	}
+}
+
+func clusterHas(t *testing.T, name string) bool {
+	t.Helper()
+	c := exec.Command("psql", "-d", "postgres", "-At", "--no-psqlrc", "-c",
+		"SELECT count(*) FROM pg_database WHERE datname = $$"+name+"$$")
+	out, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("asking the cluster about %q: %v: %s", name, err, out)
+	}
+	return strings.TrimSpace(string(out)) == "1"
+}
+
+func skipWithoutCluster(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("pg_isready").Run(); err != nil {
+		t.Skip("no postgres server responding")
 	}
 }

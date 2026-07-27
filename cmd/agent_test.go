@@ -112,6 +112,72 @@ func TestJSONGoesToStdoutAlone(t *testing.T) {
 	})
 }
 
+// TestSkipTierExitsZeroButNeverSaysOK covers the fourth verdict against the two
+// things an agent actually consumes. skip means "could not ask", so it is not a
+// FAIL and must not exit 2 — but it is not a pass either, and every face that
+// publishes a status word has to say skip rather than ok. Getting only one of
+// those halves right is how a report made entirely of unrun checks ends up
+// gating a deploy.
+func TestSkipTierExitsZeroButNeverSaysOK(t *testing.T) {
+	dir := t.TempDir()
+	gitInit(t, dir)
+	// A database the repo genuinely declares and a psql that can never answer, so
+	// every check below is skipped and nothing else is wrong.
+	write(t, filepath.Join(dir, ".env.example"), "DATABASE_URL=\n")
+	write(t, filepath.Join(dir, ".env"), "DATABASE_URL=postgres://localhost/appdb\n")
+	write(t, filepath.Join(dir, "treehouse.toml"), "[database]\npsql = \"false\"\n")
+
+	for _, args := range [][]string{
+		{"doctor"}, {"doctor", "--json"}, {"doctor", "--quiet"}, {"doctor", "--ls"},
+		{"doctor", "--db"}, {"doctor", "--db", "--json"},
+		{"ls"}, {"ls", "--json"}, {"gc", "--json"}, {"hook", "session"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			out, errOut, code := runSplit(t, dir, args...)
+			if code != 0 {
+				t.Errorf("exit %d, want 0 — an unreachable cluster is not a FAIL\n%s%s", code, out, errOut)
+			}
+			var envelope struct {
+				Status string `json:"status"`
+			}
+			if json.Unmarshal([]byte(out), &envelope) == nil && envelope.Status == "ok" {
+				t.Errorf("status = ok over a cluster nobody could reach:\n%s", out)
+			}
+		})
+	}
+
+	// The two rows `--db` exists to report used to vanish entirely when the
+	// cluster was unreachable, which reads exactly like "fine" to whoever parses
+	// it next.
+	t.Run("--db still answers about migrations and seed", func(t *testing.T) {
+		out, _, _ := runSplit(t, dir, "doctor", "--db", "--json")
+		var envelope struct {
+			Status string                          `json:"status"`
+			Checks []struct{ Name, Status string } `json:"checks"`
+		}
+		if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, out)
+		}
+		if envelope.Status != "skip" {
+			t.Errorf("status = %q, want skip", envelope.Status)
+		}
+		want := map[string]bool{"db": false, "migrations": false, "seed": false}
+		for _, c := range envelope.Checks {
+			if _, asked := want[c.Name]; asked {
+				want[c.Name] = true
+				if c.Status != "skip" {
+					t.Errorf("%s = %q, want skip", c.Name, c.Status)
+				}
+			}
+		}
+		for name, present := range want {
+			if !present {
+				t.Errorf("the %s row the flag exists for is missing entirely:\n%s", name, out)
+			}
+		}
+	})
+}
+
 // TestExitCodesAreUniform pins the contract an agent gates on without parsing
 // anything: 0 healthy or warn-only, 1 treehouse itself failed, 2 FAIL findings.
 func TestExitCodesAreUniform(t *testing.T) {
