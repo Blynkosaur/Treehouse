@@ -93,7 +93,7 @@ func wrapCommand(name string, args, env []string, out, errW io.Writer) error {
 	if vErr != nil {
 		fmt.Fprintf(os.Stderr, "%s: could not read doctor state: %v\n", name, oneLine(vErr))
 	} else {
-		fmt.Fprintln(os.Stderr, strings.Join(triageLines(v), "\n"))
+		fmt.Fprintln(os.Stderr, strings.Join(triageLines(name, v), "\n"))
 	}
 
 	code := exit.ExitCode()
@@ -215,7 +215,7 @@ func hookTriage() error {
 	// protocol is stdout-JSON plus exit 0; exit 2 is the legacy blocking shape
 	// and may read as a blocked tool call. Blocking an agent's tool call because
 	// its environment looks broken is far worse than failing to hint at it.
-	return emitContext("PostToolUse", strings.Join(triageLines(v), "\n"))
+	return emitContext("PostToolUse", strings.Join(triageLines("th triage", v), "\n"))
 }
 
 // triageExit is --stdin's contract, and only --stdin's: 2 when the environment
@@ -309,8 +309,8 @@ func hookRoot(cwd string) (string, error) {
 //
 // Hard-capped at ten lines. A verdict that scrolls is a verdict nobody reads,
 // and in a hook every line is context window spent on a guess.
-func triageLines(v check.TriageVerdict) []string {
-	head := "th triage: " + v.Cause
+func triageLines(name string, v check.TriageVerdict) []string {
+	head := name + ": " + v.Cause
 	if v.Signature != "" {
 		head += " (matched " + v.Signature + ")"
 	}

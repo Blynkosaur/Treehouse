@@ -278,7 +278,7 @@ func addedMigrations(root, mainBranch, dir string) int {
 func runIn(dir string, wt check.Worktree, command string) ([]byte, error) {
 	c := exec.Command("sh", "-c", command)
 	c.Dir = dir
-	c.Env = check.Env(wt)
+	c.Env = check.Env(wt, resolveVault(wt))
 	return c.CombinedOutput()
 }
 

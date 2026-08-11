@@ -150,11 +150,18 @@ func (w Worktree) EnvVarsByDir() map[string]map[string]string {
 // One builder for every caller, so `th run`, the migration-status command and
 // `th seed` cannot disagree about what a project command is handed.
 //
+// resolved replaces the value of the keys it names — the vault references, whose
+// .env value is a pointer rather than the secret. Nil when nothing is vaulted,
+// which is the common case and costs nothing.
+//
 // ponytail: the root .env only. A monorepo whose tooling lives in a subdirectory
 // with its own .env gets os.Environ and its own dotenv loading, same as today.
-func Env(wt Worktree) []string {
+func Env(wt Worktree, resolved map[string]string) []string {
 	env := os.Environ()
 	for key, val := range wt.EnvVarsByDir()["."] {
+		if secret, ok := resolved[key]; ok {
+			val = secret
+		}
 		env = append(env, key+"="+val)
 	}
 	return env
