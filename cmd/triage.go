@@ -45,27 +45,38 @@ func runTriage(cmd *cobra.Command, args []string) error {
 	case triageStdin:
 		return triageFromStdin()
 	case len(args) > 0:
-		return triageWrap(args)
+		return wrapCommand("th triage", args, nil, os.Stdout, os.Stderr)
 	}
 	return errors.New("nothing to triage — use `th triage -- <cmd>`, `--stdin`, or `--hook`")
 }
 
-// triageWrap is the transparent-wrapper mode, and transparent is the whole
-// contract: the wrapped command's stdout and stderr stream live to ours (a test
-// run has to look like a test run), and its exit code becomes ours VERBATIM, so
-// `th triage -- pytest` still fails a Makefile exactly like `pytest` would.
-// time, env and nice all behave this way; a wrapper that swallowed the code
-// would be a wrapper nobody could put in front of anything.
+// wrapCommand is the transparent-wrapper contract, shared by `th triage -- <cmd>`
+// and `th run -- <cmd>`, and transparent is the whole contract: the wrapped
+// command's stdout and stderr stream live to ours (a test run has to look like a
+// test run), and its exit code becomes ours VERBATIM, so `th triage -- pytest`
+// still fails a Makefile exactly like `pytest` would. time, env and nice all
+// behave this way; a wrapper that swallowed the code would be a wrapper nobody
+// could put in front of anything.
 //
 // That deliberately overloads exitCode, whose 0/1/2 are otherwise a verdict
 // about the worktree — so the verdict goes to STDERR instead, where diagnostics
 // belong and where it cannot corrupt a piped stdout.
-func triageWrap(args []string) error {
+//
+// ONE wrapper, two doors. The two commands differ only in what they hand the
+// child (env) and where the streams go (out, errW); everything about exit codes,
+// signals and the failure verdict has to stay identical, and the way to
+// guarantee that is to have one copy of it.
+//
+// env nil inherits this process's environment, the os/exec default. out and
+// errW are where the child's streams are copied to — os.Stdout and os.Stderr
+// unless a caller is scrubbing them.
+func wrapCommand(name string, args, env []string, out, errW io.Writer) error {
 	c := exec.Command(args[0], args[1:]...)
 	c.Stdin = os.Stdin
+	c.Env = env
 	var tee tail
-	c.Stdout = io.MultiWriter(os.Stdout, &tee)
-	c.Stderr = io.MultiWriter(os.Stderr, &tee)
+	c.Stdout = io.MultiWriter(out, &tee)
+	c.Stderr = io.MultiWriter(errW, &tee)
 
 	err := c.Run()
 	if err == nil {
@@ -74,13 +85,13 @@ func triageWrap(args []string) error {
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) {
 		// Never started: not a failure of the command, a failure to find it.
-		fmt.Fprintf(os.Stderr, "th triage: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
 		return exitCode(127) // the shell's own code for "command not found"
 	}
 
 	v, vErr := verdictFor("", tee.String())
 	if vErr != nil {
-		fmt.Fprintf(os.Stderr, "th triage: could not read doctor state: %v\n", oneLine(vErr))
+		fmt.Fprintf(os.Stderr, "%s: could not read doctor state: %v\n", name, oneLine(vErr))
 	} else {
 		fmt.Fprintln(os.Stderr, strings.Join(triageLines(v), "\n"))
 	}

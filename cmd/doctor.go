@@ -273,18 +273,12 @@ func addedMigrations(root, mainBranch, dir string) int {
 }
 
 // runIn runs one of the project's own commands in dir, with this worktree's
-// root .env in the environment — that is what makes `alembic current` answer
-// about THIS worktree's clone rather than whatever the shell happened to
-// export. ponytail: the root .env only; a monorepo whose migration tool lives
-// in a subdirectory with its own .env gets os.Environ and its own dotenv
-// loading, same as it has today.
+// root .env in the environment. check.Env is the one builder — see the ceiling
+// documented there.
 func runIn(dir string, wt check.Worktree, command string) ([]byte, error) {
 	c := exec.Command("sh", "-c", command)
 	c.Dir = dir
-	c.Env = os.Environ()
-	for key, val := range wt.EnvVarsByDir()["."] {
-		c.Env = append(c.Env, key+"="+val)
-	}
+	c.Env = check.Env(wt)
 	return c.CombinedOutput()
 }
 

@@ -141,6 +141,25 @@ func (w Worktree) EnvVarsByDir() map[string]map[string]string {
 	return byDir
 }
 
+// Env is the environment one of the project's own commands runs in: this
+// process's environment with the worktree's ROOT .env overlaid on top. Later
+// entries win in os/exec, so .env is the override and the ambient shell is the
+// default — that is what makes `alembic current` answer about THIS worktree's
+// clone rather than whatever the shell happened to export.
+//
+// One builder for every caller, so `th run`, the migration-status command and
+// `th seed` cannot disagree about what a project command is handed.
+//
+// ponytail: the root .env only. A monorepo whose tooling lives in a subdirectory
+// with its own .env gets os.Environ and its own dotenv loading, same as today.
+func Env(wt Worktree) []string {
+	env := os.Environ()
+	for key, val := range wt.EnvVarsByDir()["."] {
+		env = append(env, key+"="+val)
+	}
+	return env
+}
+
 // ComposeProjects names the compose projects this worktree owns: the
 // COMPOSE_PROJECT_NAME E2 wrote into its .env files, minus every name the main
 // checkout also claims.
