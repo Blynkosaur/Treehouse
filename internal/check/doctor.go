@@ -11,6 +11,7 @@ import (
 // from treehouse.toml; more fields arrive with services and data checks.
 type Doctor struct {
 	Required   []string // keys whose absence is a FAIL, not a WARN
+	Secrets    []string // keys that must be vaulted; a cleartext value is a FAIL
 	MainBranch string   // what Row measures "behind" against; empty = main is detached or bare
 
 	// Databases is every database in the cluster, asked once by cmd and handed

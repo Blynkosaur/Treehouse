@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -207,4 +208,44 @@ func pipeTo(t *testing.T, dir, stdin string, args ...string) (stdout, stderr str
 		code = exit.ExitCode()
 	}
 	return o.String(), e.String(), code
+}
+
+// TestSessionHookStaysInBudgetWhenVaulted: the SessionStart context is
+// PREPENDED TO A CONTEXT WINDOW, and the vault pointer is a second tail line.
+// Nine lines is the budget whether or not it is there, so the state rows have
+// to give way to it rather than the other way round.
+func TestSessionHookStaysInBudgetWhenVaulted(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "app")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, dir)
+	// Enough drift to overrun the budget on its own: several services missing
+	// keys, plus a vaulted key so the second tail line fires.
+	write(t, filepath.Join(dir, ".env.example"), "PORT=\nDB_URL=\nAPI_TOKEN=\n")
+	write(t, filepath.Join(dir, ".env"), "API_TOKEN=th:API_TOKEN\n")
+	for _, svc := range []string{"svc_a", "svc_b", "svc_c", "svc_d"} {
+		write(t, filepath.Join(dir, svc, ".env.example"), "PORT=\nDB_URL=\n")
+		write(t, filepath.Join(dir, svc, ".env"), "PORT=3000\n")
+	}
+
+	out, _, _ := runSplit(t, dir, "hook", "session")
+	var payload struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("hook session did not emit JSON: %v\n%s", err, out)
+	}
+	ctx := payload.HookSpecificOutput.AdditionalContext
+	if n := len(strings.Split(ctx, "\n")); n > 9 {
+		t.Fatal(errRun{"session context with a vaulted key", "at most 9 lines", strconv.Itoa(n)})
+	}
+	if !strings.Contains(ctx, "th run -- <cmd>") {
+		t.Fatal(errRun{"session context in a vaulted worktree", "the th run pointer", ctx})
+	}
+	if !strings.Contains(ctx, "th triage -- <cmd>") {
+		t.Fatal(errRun{"session context", "the triage pointer, which the vault line must not evict", ctx})
+	}
 }

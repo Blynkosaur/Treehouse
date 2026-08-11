@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
+	"github.com/Blynkosaur/treehouse/internal/vault"
 	"github.com/spf13/cobra"
 )
 
@@ -33,6 +34,16 @@ func init() {
 // compact) and only some of those are worth spending context on, but that
 // filter belongs in settings.json's matcher, where a human can see and change
 // it — not buried in a binary. See the README hook block.
+// vaulted reports whether this worktree's root .env actually references the
+// vault. Cheap — it reads the file it already walked and asks no keychain.
+func vaulted(root string) bool {
+	wt, err := check.Discover(root)
+	if err != nil {
+		return false
+	}
+	return len(vault.Refs(wt.EnvVarsByDir()["."])) > 0
+}
+
 func runHookSession(cmd *cobra.Command, args []string) error {
 	// Claude Code names the project directory outright, which beats whatever
 	// cwd a hook subprocess inherited.
@@ -57,8 +68,21 @@ func sessionLines(findings []check.Finding, checks []check.Check, root string) [
 	verdict := check.Verdict(findings, checks)
 	lines := []string{"treehouse — " + filepath.Base(root) + ": environment " + verdict}
 
+	// The tail is built FIRST so the state rows can be capped around it. These
+	// two lines are the ones an agent cannot infer from the state above, so they
+	// outrank a fourth failing check when the budget runs out.
+	tail := []string{"  `th triage -- <cmd>` says whether a failure is the environment or the code"}
+	if vaulted(root) {
+		// Only where it is true. An agent told to use `th run` in a repo with
+		// nothing vaulted has been handed a rule with no reason, and rules with
+		// no reason are the ones ignored when they matter.
+		tail = append(tail, "  secrets are vaulted: .env holds `th:` references, so run commands as `th run -- <cmd>`")
+	}
+	// nine total, minus the tail, minus the one line "run th doctor" may add.
+	room := 9 - len(tail) - 1
+
 	for _, f := range findings {
-		if len(lines) == 4 {
+		if len(lines) == room-2 {
 			break // three services is enough to say "the env is broken"
 		}
 		if f.Drifted() {
@@ -66,7 +90,7 @@ func sessionLines(findings []check.Finding, checks []check.Check, root string) [
 		}
 	}
 	for _, c := range checks {
-		if len(lines) == 7 {
+		if len(lines) == room {
 			break
 		}
 		// skip is here too, and that is the point: a check that could not run is
@@ -87,7 +111,5 @@ func sessionLines(findings []check.Finding, checks []check.Check, root string) [
 	} else {
 		lines = append(lines, "  run `th doctor` for the full report, `th hydrate` to repair")
 	}
-	// The one thing worth telling an agent that it cannot infer from the state
-	// above: there is a tool for the next failure.
-	return append(lines, "  `th triage -- <cmd>` says whether a failure is the environment or the code")
+	return append(lines, tail...)
 }

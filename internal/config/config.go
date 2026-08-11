@@ -26,7 +26,16 @@ type File struct {
 	Seed       []check.Seed      `toml:"seed"`
 	Signature  []check.Signature `toml:"signature"`
 	Service    []check.Service   `toml:"service"`
+	Secrets    Secrets           `toml:"secrets"`
 	Open       Open              `toml:"open"`
+}
+
+// Secrets is the curated tier of the vault check. Key names that merely LOOK
+// like secrets are inferred and warned about; naming one here says it must not
+// sit in .env in cleartext, and doctor fails until it doesn't. The same split
+// [env] required makes over the keys inferred from .env.example.
+type Secrets struct {
+	Keys []string `toml:"keys"`
 }
 
 // Open is L1's hand-off: the command `th new` runs inside a worktree that came

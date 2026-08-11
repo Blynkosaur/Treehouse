@@ -13,6 +13,7 @@ import (
 	"github.com/Blynkosaur/treehouse/internal/check"
 	"github.com/Blynkosaur/treehouse/internal/config"
 	"github.com/Blynkosaur/treehouse/internal/pg"
+	"github.com/Blynkosaur/treehouse/internal/vault"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
 	"github.com/spf13/cobra"
@@ -87,6 +88,7 @@ func diagnose(root string) ([]check.Finding, []check.Check, error) {
 		source, _ = check.Discover(mainRoot)
 		cfg, checks = loadConfig(mainRoot)
 		d.Required = cfg.Env.Required
+		d.Secrets = cfg.Secrets.Keys
 		pg.Use(cfg.Database.Psql)
 	}
 
@@ -99,6 +101,7 @@ func diagnose(root string) ([]check.Finding, []check.Check, error) {
 	refs, _ := check.Worktrees(root)
 	checks = append(checks, dbChecks(d, refs, root, mainRoot, wt, source, cfg)...)
 	checks = append(checks, serviceChecks(d, wt, cfg)...)
+	checks = append(checks, secretChecks(d, wt, mainRoot)...)
 	return findings, append(checks, baseChecks(d, refs, root, mainRoot)...), nil
 }
 
@@ -270,6 +273,25 @@ func addedMigrations(root, mainBranch, dir string) int {
 		}
 	}
 	return n
+}
+
+// secretChecks is the impure half of CheckSecrets: asking the keychain which
+// references actually resolve. Beside CheckServices/DialServices, and for the
+// same reason — the judgment stays pure and testable, the I/O stays here.
+//
+// A keychain that will not answer at all reports nothing rather than calling
+// every reference dangling. "Nobody could ask" is not "the secret is gone", and
+// a FAIL row on every vaulted key because the keychain was locked is exactly
+// the kind of confident wrong verdict this report is built to avoid.
+func secretChecks(d check.Doctor, wt check.Worktree, mainRoot string) []check.Check {
+	vars := wt.EnvVarsByDir()["."]
+	var dangling []string
+	for key, name := range vault.Refs(vars) {
+		if _, err := vault.Get(mainRoot, name); errors.Is(err, vault.ErrNotFound) {
+			dangling = append(dangling, key)
+		}
+	}
+	return d.CheckSecrets(vars, dangling)
 }
 
 // runIn runs one of the project's own commands in dir, with this worktree's
