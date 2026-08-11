@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/Blynkosaur/treehouse/internal/vault"
 )
 
 // Slug turns a branch name into one identifier usable everywhere a worktree
@@ -185,9 +187,18 @@ func (d Doctor) PlanDerive(w, source Worktree, in DeriveInput) []Repair {
 func repointDB(vars map[string]string, db string) (add map[string]string, warn, skip string) {
 	raw, hasURL := vars["DATABASE_URL"]
 	old, hasDB := vars["POSTGRES_DB"]
+	// A vaulted key holds a pointer to a secret, and overwriting it with a
+	// literal would orphan the keychain entry AND destroy the only thing that
+	// knew where the value lived. Skip, never fail — the E3 rule: hydrate does
+	// not abort over a derived value it cannot safely write.
+	_, urlIsRef := vault.IsRef(raw)
+	_, dbIsRef := vault.IsRef(old)
+
 	switch {
 	case !hasURL && !hasDB:
 		return nil, "", ""
+	case urlIsRef || dbIsRef:
+		return nil, "", "the database keys are vaulted — a derived value cannot be written over a th: reference, so point this worktree at its clone by hand or unvault the key"
 	case !hasURL:
 		return map[string]string{"POSTGRES_DB": db}, "", ""
 	}
