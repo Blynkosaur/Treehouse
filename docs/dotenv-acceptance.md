@@ -147,6 +147,77 @@ Generates `.env.example` from each service's `.env`, keys copied, values blanked
 | 3 | Empty worktree → falls back to main's `.env` files, generates from those | `TestMake/fallback_to_main_worktree` |
 | 4 | No `.env` anywhere → honest "no .env files found" message, creates nothing | `TestMake/nothing_anywhere` |
 
+## `vault.IsRef(value)` — `internal/vault/ref.go`
+
+Decides whether a `.env` value is a pointer to a stored secret or the secret itself.
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | `th:STRIPE_SECRET` → the name it points at | `TestIsRef` |
+| 2 | The match is **whole-value**: `postgres://user:th:pass@host/db` is a value, not a reference — a substring rule silently turns a password into a pointer | `TestIsRef` |
+| 3 | No minimum-length floor, because the anchor is the safety rule: `th:KEY` is an ordinary key name and must resolve | `TestIsRef` |
+| 4 | Bare `th:`, a name over 64 bytes, or any character outside `[A-Za-z0-9_]` is not a reference | `TestIsRef` |
+
+## `vault` keychain — `internal/vault/keychain.go`
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | Store → read back **byte for byte**, including spaces, quotes, `$(id)`, `#`, a trailing space and non-ASCII | `TestKeychainRoundTrip` |
+| 2 | A value containing a tab survives. `security -w` prints **hex** for non-printable bytes with no way to tell it from a hex-looking password, so stored bytes are tagged base64 | `TestKeychainRoundTrip` |
+| 3 | `Delete` of an absent secret is a no-op, not an error — the caller asked for it to be gone | `TestKeychainRoundTrip` |
+| 4 | Account is repo-scoped (`<main path>:<KEY>`): two repos declaring one key never share an entry, and it is stable across calls | `TestAccount` |
+| 5 | An unresolvable reference is an **error naming the key and the fix**, never an empty value | `TestResolveNeverGuesses`, `TestRunRefusesADanglingReference` |
+| 6 | No references in `.env` → the keychain is never asked at all | `TestResolveNeverGuesses` |
+
+## `vault.Redactor` — `internal/vault/redact.go`
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | A resolved value in the child's output is replaced with `$KEY` | `TestRedactor` |
+| 2 | A value split across two `Write`s is still caught (the reason it buffers) | `TestRedactor` |
+| 3 | The **longest** secret wins — a password is usually a substring of the `DATABASE_URL` embedding it | `TestRedactor` |
+| 4 | A tail with no trailing newline arrives on `Flush`, not silently dropped | `TestRedactor` |
+| 5 | Nothing to hide returns the writer **unwrapped**; a one-byte secret is not a rule | `TestRedactor` |
+| 6 | `Write` always returns the caller's own count — a short count is `io.MultiWriter`'s `ErrShortWrite` | `TestRedactor` |
+
+## `th run` — `cmd/run.go`
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | A literal `.env` value reaches the child unchanged: `th run` is useful before anything is vaulted | `TestRunInjectsWithoutHandingOver` |
+| 2 | After `th vault add`, `.env` no longer holds the value and the child still gets it byte for byte | `TestRunInjectsWithoutHandingOver` |
+| 3 | A child printing its own secret has it redacted; `--no-redact` opts out | `TestRunInjectsWithoutHandingOver` |
+| 4 | Exit code verbatim (3 stays 3); 127 when the binary could not start | `TestRunIsATransparentWrapper` |
+| 5 | The child's own flags are its own — cobra does not eat `-q` | `TestRunIsATransparentWrapper` |
+| 6 | stdout and stderr stay apart, and an unterminated tail still arrives | `TestRunIsATransparentWrapper` |
+| 7 | A dangling reference exits non-zero **and the child never starts** | `TestRunRefusesADanglingReference` |
+
+## `th vault` — `cmd/vault.go`
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | `ls` prints key names and status, **never a value**; exits 2 on a dangling reference with the fix line | `TestVaultLsNeverPrintsValues` |
+| 2 | `add` reads a piped value for a key `.env` never declared, and for rotating one already vaulted | `TestVaultAddFromStdin` |
+
+## `CheckSecrets` — `internal/check/secrets.go`
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | A secret-looking name in cleartext → **warn** (inferred tier) | `TestCheckSecrets` |
+| 2 | A key in `[secrets] keys` in cleartext → **fail**, whatever its name looks like | `TestCheckSecrets` |
+| 3 | A reference resolving to nothing → **fail**, naming `th vault add <KEY>` | `TestCheckSecrets` |
+| 4 | A resolvable reference, an empty value, or nothing secret-looking → **no rows at all** | `TestCheckSecrets` |
+| 5 | No row ever contains a value | `TestCheckSecrets` |
+| 6 | The heuristic does not fire on `PORT`, `DATABASE_URL`, `KEYCLOAK_HOST` — a false alarm in every repo is how a report stops being read | `TestLooksSecret` |
+
+## `EnvDB` / `repointDB` against a reference — `internal/check/`
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | `EnvDB` returns `""` for a vaulted `POSTGRES_DB` — `Quote` accepts `th:POSTGRES_DB`, so nothing downstream would catch `CREATE DATABASE "th:POSTGRES_DB"` | `TestEnvDBNeverReturnsAReference` |
+| 2 | A vaulted `DATABASE_URL` beside a literal `POSTGRES_DB` still answers with the literal | `TestEnvDBNeverReturnsAReference` |
+| 3 | `repointDB` declines with a **skip reason**, never an error and never a write, when either key is a reference | `TestRepointRefusesAVaultedKey` |
+
 ---
 
 Deliberate non-goals (documented in code): present-but-empty keys are doctor's
@@ -164,6 +235,15 @@ monorepo sets `[migrations] dir`; `th seed` records datasets in a marker table
 inside the worktree's own database, so a dataset loaded by hand outside
 treehouse is invisible to doctor; `[database] psql` is split on whitespace, so a
 prefix argument containing a space cannot be expressed.
+
+The vault's ceilings, on purpose: `security -w` puts the value on argv, so it is
+visible to `ps` for the few milliseconds the call takes (security(1) cannot read
+it from stdin, and the upgrade path is a new dependency bought for a window in
+which an attacker could already read the `.env` the value came from); redaction
+is line-buffered, so a value containing a newline survives the boundary;
+`th run` injects the **root** `.env` only, the same ceiling `runIn` already had;
+and a reference name is always the key name, with no aliasing, so two keys
+needing one value are stored twice.
 
 CR-only (classic-Mac) line endings are **deliberately** not handled: `Parse`
 can't read that format either, so the two sides are self-consistent, and
