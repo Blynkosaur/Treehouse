@@ -131,6 +131,16 @@ func TestRunRefusesADanglingReference(t *testing.T) {
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal(errRun{"a dangling reference", "the child never starts", "the child ran"})
 	}
+	// Refusing is universal; the REASON is not. Off macOS there is no keychain
+	// to be missing from, and the refusal says so — which is the documented
+	// behaviour for a vaulted repo checked out on Linux, and worth pinning
+	// there rather than skipping the whole test.
+	if err := vault.Available(); err != nil {
+		if !strings.Contains(errOut, "vault") {
+			t.Fatal(errRun{"the error with no keychain", "a refusal naming the vault", errOut})
+		}
+		return
+	}
 	// The KEY, not the reference name: it is what the user types into
 	// `th vault add`, and with ALIAS=th:shared the two differ.
 	if !strings.Contains(errOut, "GONE") {
