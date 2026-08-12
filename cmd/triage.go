@@ -70,6 +70,15 @@ func runTriage(cmd *cobra.Command, args []string) error {
 // env nil inherits this process's environment, the os/exec default. out and
 // errW are where the child's streams are copied to — os.Stdout and os.Stderr
 // unless a caller is scrubbing them.
+//
+// EVERYTHING this function prints goes to errW, never to os.Stderr directly,
+// and that is load-bearing rather than tidy. The verdict is built from `tee`,
+// which holds the child's RAW bytes — MatchSignature hands back the matched
+// output LINE as its evidence, so a connection string in a failing command's
+// stderr comes back verbatim. Printed past the redactor it would put the secret
+// in front of the agent with a `th run:` prefix that reads as trustworthy tool
+// output, on the most common trigger there is: a command that failed. errW is
+// the gate; nothing here may route around it.
 func wrapCommand(name string, args, env []string, out, errW io.Writer) error {
 	c := exec.Command(args[0], args[1:]...)
 	c.Stdin = os.Stdin
@@ -85,15 +94,15 @@ func wrapCommand(name string, args, env []string, out, errW io.Writer) error {
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) {
 		// Never started: not a failure of the command, a failure to find it.
-		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
+		fmt.Fprintf(errW, "%s: %v\n", name, err)
 		return exitCode(127) // the shell's own code for "command not found"
 	}
 
 	v, vErr := verdictFor("", tee.String())
 	if vErr != nil {
-		fmt.Fprintf(os.Stderr, "%s: could not read doctor state: %v\n", name, oneLine(vErr))
+		fmt.Fprintf(errW, "%s: could not read doctor state: %v\n", name, oneLine(vErr))
 	} else {
-		fmt.Fprintln(os.Stderr, strings.Join(triageLines(name, v), "\n"))
+		fmt.Fprintln(errW, strings.Join(triageLines(name, v), "\n"))
 	}
 
 	code := exit.ExitCode()

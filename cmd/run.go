@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
+	"github.com/Blynkosaur/treehouse/internal/envfile"
 	"github.com/Blynkosaur/treehouse/internal/vault"
 	"github.com/spf13/cobra"
 )
@@ -77,7 +78,10 @@ func runRun(cmd *cobra.Command, args []string) error {
 // every worktree of one repo resolves the same value.
 func resolveVaultErr(root string, wt check.Worktree) (map[string]string, error) {
 	vars := wt.EnvVarsByDir()["."]
-	if len(vault.Refs(vars)) == 0 {
+	// AnyRef, not Refs: a MALFORMED reference is not in Refs, and a guard
+	// written on Refs would short-circuit straight past the value that has to be
+	// refused — handing the child "th:v2:KEY" as its secret.
+	if !envfile.AnyRef(vars) {
 		return nil, nil // nothing vaulted: no keychain, no prompt, no cost
 	}
 	mainRoot, err := check.MainWorktree(root)

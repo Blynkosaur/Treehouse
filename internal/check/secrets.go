@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Blynkosaur/treehouse/internal/vault"
+	"github.com/Blynkosaur/treehouse/internal/envfile"
 )
 
 // secretish are the substrings that make a key name look like it holds a
@@ -66,7 +66,7 @@ func (d Doctor) CheckSecrets(vars map[string]string, dangling []string) []Check 
 		if val == "" {
 			continue // nothing to leak, and CheckEnv already nags about empties
 		}
-		if _, isRef := vault.IsRef(val); isRef {
+		if _, isRef := envfile.IsRef(val); isRef {
 			continue
 		}
 		switch {

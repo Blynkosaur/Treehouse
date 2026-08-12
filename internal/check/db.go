@@ -8,7 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/Blynkosaur/treehouse/internal/vault"
+	"github.com/Blynkosaur/treehouse/internal/envfile"
 )
 
 // Quote renders name as a Postgres quoted identifier: wrapped in double quotes,
@@ -127,7 +127,7 @@ func EnvDB(w Worktree) string {
 	// declaring no database says, and it means nothing is created and psql is
 	// never asked. This is the one guard for every reader of "which database";
 	// the writer's half is repointDB.
-	if _, isRef := vault.IsRef(vars["POSTGRES_DB"]); isRef {
+	if _, isRef := envfile.IsRef(vars["POSTGRES_DB"]); isRef {
 		return ""
 	}
 	return vars["POSTGRES_DB"]

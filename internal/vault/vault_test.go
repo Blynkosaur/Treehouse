@@ -7,82 +7,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
-
-// errRef is what a broken reference rule looks like when it is reported.
-type errRef struct{ value, want, got string }
-
-func (e errRef) Error() string {
-	return "IsRef(" + e.value + "): want " + e.want + ", got " + e.got
-}
-
-// TestIsRef pins the whole-value rule. The substring cases are the ones that
-// matter: a value that merely CONTAINS "th:" is a secret, and reading it as a
-// pointer would silently swap somebody's password for a keychain lookup.
-func TestIsRef(t *testing.T) {
-	for _, c := range []struct {
-		value string
-		name  string // "" means: not a reference
-	}{
-		{"th:STRIPE_SECRET", "STRIPE_SECRET"},
-		{"th:KEY", "KEY"}, // three characters: a floor of 4 would break this
-		{"th:a", "a"},     // one is legal too; anchoring is the safety rule
-		{"th:A_1", "A_1"},
-
-		{"", ""},
-		{"th:", ""}, // prefix alone points at nothing
-		{"sk-live-abcdef", ""},
-		{"postgres://user:th:pass@host/db", ""}, // contains th:, is not a reference
-		{"xth:KEY", ""},                         // must START with the prefix
-		{"th:KEY ", ""},                         // trailing space: a value, not a name
-		{"th:KEY=v", ""},
-		{"th:a-b", ""},                           // - is not in the alphabet
-		{"th:" + string(make([]byte, 0, 0)), ""}, // same as bare prefix
-		{"th:" + longName(64), longName(64)},
-		{"th:" + longName(65), ""}, // one over the cap
-	} {
-		got, ok := IsRef(c.value)
-		want, wantOK := c.name, c.name != ""
-		if ok != wantOK || got != want {
-			t.Error(errRef{c.value, describe(want, wantOK), describe(got, ok)})
-		}
-	}
-}
-
-func longName(n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = 'A'
-	}
-	return string(b)
-}
-
-func describe(name string, ok bool) string {
-	if !ok {
-		return "not a reference"
-	}
-	return "reference to " + name
-}
-
-// TestRefs: only the referenced keys come back, and a literal is left alone.
-func TestRefs(t *testing.T) {
-	got := Refs(map[string]string{
-		"STRIPE_SECRET": "th:STRIPE_SECRET",
-		"PORT":          "3000",
-		"DATABASE_URL":  "postgres://localhost/app",
-		"OTHER":         "th:shared_token",
-	})
-	want := map[string]string{"STRIPE_SECRET": "STRIPE_SECRET", "OTHER": "shared_token"}
-	if len(got) != len(want) {
-		t.Fatalf("Refs: want %v, got %v", want, got)
-	}
-	for k, v := range want {
-		if got[k] != v {
-			t.Fatalf("Refs[%s]: want %q, got %q", k, v, got[k])
-		}
-	}
-}
 
 // TestAccountIsRepoScopedNotBranchScoped: two repos declaring the same key must
 // not share an entry, and two branches of one repo must.
@@ -106,6 +33,7 @@ func TestRedactor(t *testing.T) {
 		var out bytes.Buffer
 		w := NewRedactor(&out, secrets)
 		mustWrite(t, w, "connecting with hunter2horse now\n")
+		mustFlush(t, w)
 		if got := out.String(); got != "connecting with $PASSWORD now\n" {
 			t.Fatalf("want the value replaced, got %q", got)
 		}
@@ -119,6 +47,7 @@ func TestRedactor(t *testing.T) {
 			t.Fatalf("wrote a partial line through unredacted: %q", out.String())
 		}
 		mustWrite(t, w, "er2horse\n")
+		mustFlush(t, w)
 		if got := out.String(); got != "token=$PASSWORD\n" {
 			t.Fatalf("want the split value replaced, got %q", got)
 		}
@@ -131,6 +60,7 @@ func TestRedactor(t *testing.T) {
 		var out bytes.Buffer
 		w := NewRedactor(&out, secrets)
 		mustWrite(t, w, "dial postgres://u:hunter2horse@h/d failed\n")
+		mustFlush(t, w)
 		if got := out.String(); got != "dial $URL failed\n" {
 			t.Fatalf("want the longest match replaced, got %q", got)
 		}
@@ -140,14 +70,39 @@ func TestRedactor(t *testing.T) {
 		var out bytes.Buffer
 		w := NewRedactor(&out, secrets)
 		mustWrite(t, w, "prompt hunter2horse>")
-		if out.Len() != 0 {
-			t.Fatal("an unterminated tail was written through before Flush")
-		}
-		if err := Flush(w); err != nil {
-			t.Fatal(err)
-		}
+		mustFlush(t, w)
 		if got := out.String(); got != "prompt $PASSWORD>" {
 			t.Fatalf("want the tail flushed and redacted, got %q", got)
+		}
+	})
+
+	// A wrapper that stops streaming is not a wrapper. Buffering to the last
+	// NEWLINE meant a \r progress bar, or a "Password: " prompt, sat in the
+	// buffer for the whole run — and a chatty newline-free child grew it without
+	// bound. Only maxLen-1 bytes are ever held back now.
+	t.Run("output with no newline still streams", func(t *testing.T) {
+		var out bytes.Buffer
+		w := NewRedactor(&out, secrets)
+		longest := len("postgres://u:hunter2horse@h/d") // 29
+		mustWrite(t, w, strings.Repeat("progress...", 20))
+		if held := 220 - out.Len(); held >= longest {
+			t.Fatalf("held back %d bytes with no newline in sight; only the longest secret (%d) minus one may be withheld", held, longest)
+		}
+		if strings.Contains(out.String(), "hunter2horse") {
+			t.Fatal("a secret escaped while streaming")
+		}
+	})
+
+	// The reason for the hold-back, at its exact boundary.
+	t.Run("a secret split one byte at a time is still caught", func(t *testing.T) {
+		var out bytes.Buffer
+		w := NewRedactor(&out, secrets)
+		for _, b := range []byte("xx hunter2horse yy") {
+			mustWrite(t, w, string(b))
+		}
+		mustFlush(t, w)
+		if got := out.String(); got != "xx $PASSWORD yy" {
+			t.Fatalf("want the byte-by-byte value replaced, got %q", got)
 		}
 	})
 
@@ -163,6 +118,13 @@ func TestRedactor(t *testing.T) {
 			t.Fatal("a one-byte secret must not become a redaction rule")
 		}
 	})
+}
+
+func mustFlush(t *testing.T, w io.Writer) {
+	t.Helper()
+	if err := Flush(w); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func mustWrite(t *testing.T, w io.Writer, s string) {

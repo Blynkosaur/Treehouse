@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Blynkosaur/treehouse/internal/vault"
+	"github.com/Blynkosaur/treehouse/internal/envfile"
 )
 
 // Slug turns a branch name into one identifier usable everywhere a worktree
@@ -191,8 +191,8 @@ func repointDB(vars map[string]string, db string) (add map[string]string, warn, 
 	// literal would orphan the keychain entry AND destroy the only thing that
 	// knew where the value lived. Skip, never fail — the E3 rule: hydrate does
 	// not abort over a derived value it cannot safely write.
-	_, urlIsRef := vault.IsRef(raw)
-	_, dbIsRef := vault.IsRef(old)
+	_, urlIsRef := envfile.IsRef(raw)
+	_, dbIsRef := envfile.IsRef(old)
 
 	switch {
 	case !hasURL && !hasDB:

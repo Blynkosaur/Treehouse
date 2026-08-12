@@ -871,3 +871,32 @@ func TestEnvDBNeverReturnsAReference(t *testing.T) {
 		t.Fatalf("EnvDB = %q, want app_dev", got)
 	}
 }
+
+// TestCheckEnvDropsUnresolved: a reference nothing resolved must be DROPPED, not
+// handed to the child as the literal "th:KEY". A child given
+// POSTGRES_PASSWORD=th:POSTGRES_PASSWORD fails with "password authentication
+// failed", which names nothing; unset, it fails with "environment variable
+// POSTGRES_PASSWORD is not set", which the missing-env signature already
+// explains.
+func TestCheckEnvDropsUnresolved(t *testing.T) {
+	wt := Worktree{Root: "/main", EnvFiles: []envfile.File{{Path: "/main/.env", Vars: map[string]string{
+		"PORT":     "3000",
+		"RESOLVED": "th:RESOLVED",
+		"DANGLING": "th:DANGLING",
+	}}}}
+	got := map[string]bool{}
+	for _, kv := range Env(wt, map[string]string{"RESOLVED": "the-real-value"}) {
+		got[kv] = true
+	}
+	if !got["PORT=3000"] {
+		t.Fatal("a literal was not passed through")
+	}
+	if !got["RESOLVED=the-real-value"] {
+		t.Fatal("a resolved reference was not substituted")
+	}
+	for kv := range got {
+		if strings.HasPrefix(kv, "DANGLING=") {
+			t.Fatalf("an unresolved reference reached the child as %q", kv)
+		}
+	}
+}

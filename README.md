@@ -77,9 +77,12 @@ The binary is `treehouse`; every example here uses the shorter alias.
 alias th=treehouse    # in .bashrc / .zshrc / config.fish
 ```
 
-macOS and Linux. Two features are macOS-only and degrade rather than break:
-copy-on-write dependency cloning needs APFS, and the secret vault needs the
-macOS keychain.
+macOS and Linux, with two macOS-only features that behave differently from each
+other. Copy-on-write dependency cloning needs APFS and **degrades** — it falls
+back to a plain copy. The secret vault needs the macOS keychain and **refuses**:
+elsewhere, `th run` will not start a command whose `.env` holds a `th:`
+reference, and `th doctor` reports a `vault: skip` row saying why. A repo that
+vaults its secrets is a repo the rest of the team cannot run on Linux.
 
 ## Quickstart
 
@@ -99,7 +102,7 @@ th ls                      # the whole fleet, one row each
 | `th tui` | The dashboard, explicitly. |
 | `th new <branch>` | Cuts a worktree beside the main checkout, runs the full hydrate pipeline, prints a doctor report and hands it to your `[open]` command. `--from <ref>`, `--path <dir>`, `--skip-deps`, `--open`, `--no-open`. |
 | `th hydrate` | Fills this worktree's `.env` files from the main checkout, provisions heavy dep dirs, clones this branch's database, then writes derived values. `--dry`, `--skip-deps`, `--force-db`. |
-| `th doctor` | Env drift per service, whether this worktree has its own database and is pointed at it, whether declared services are listening, secrets in cleartext, and how far behind main it is. `--db` adds migration and seed state. `--ls`, `--json`, `--quiet`. |
+| `th doctor` | Env drift per service, whether this worktree has its own database and is pointed at it, whether declared services are listening, cleartext secrets in the root `.env`, and how far behind main it is. `--db` adds migration and seed state. `--ls`, `--json`, `--quiet`. |
 | `th ls` | One table: every worktree × branch × env × db × behind-main × dirty. Exits 2 on a FAIL fleet, like `doctor`. `--json`. |
 | `th why` | One line: what changed since everything was last green. Always exits 0. `--json`, `--db`. |
 | `th run -- <cmd>` | Runs the command with this worktree's env, resolving vaulted secrets into the child and scrubbing them out of the output. `--no-redact`. |
@@ -157,6 +160,11 @@ still holds a value is a **warning**, a key named in `[secrets] keys` is a
 **failure**, and a reference pointing at a secret that is not there is a
 **failure** — that last state is invisible in the file, since a dangling
 reference looks exactly like a working one.
+
+**The vault is the worktree root's `.env` only**, because that is the file
+`th run` injects. A monorepo's `services/api/.env` is checked for drift like any
+other, but its secrets are neither vaulted nor reported — keep the ones worth
+hiding in the root file.
 
 ```toml
 # treehouse.toml, committed

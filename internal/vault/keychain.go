@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/Blynkosaur/treehouse/internal/envfile"
 )
 
 // service is the keychain service every treehouse entry is filed under. The
@@ -44,6 +46,13 @@ var ErrNotFound = errors.New("no such secret")
 // worktree resolves the same value, `th rm` orphans nothing, and there is no
 // state for `th gc` to chase. The same bargain E3's port registry and A4's seed
 // marker already make.
+// ponytail: keychain entries outlive the repo, and nothing can enumerate them.
+// Deleting the repo directory leaves them forever; MOVING it makes every one of
+// them unreachable, because the path IS the identity. `th gc` cannot help with
+// either — security(1) offers no way to list by service short of
+// dump-keychain. A stable repo identity that survives both a move and a clone
+// does not exist cheaply, so this is the trade; what it costs is named in the
+// not-found message, which tells the user where the value still is.
 func Account(mainRoot, key string) string { return mainRoot + ":" + key }
 
 // Available reports whether this machine has somewhere to put a secret.
@@ -55,6 +64,30 @@ func Available() error {
 	}
 	if _, err := exec.LookPath("security"); err != nil {
 		return fmt.Errorf("security(1) is not on PATH: %w", err)
+	}
+	return nil
+}
+
+// Has reports whether an entry exists WITHOUT reading it.
+//
+// Existence is all doctor and `th vault ls` need, and they run constantly —
+// doctor is reached from ls, new, why, hook session and triage. Asking Get
+// would pull every secret's cleartext into the address space of a process whose
+// whole job is to not have it, on commands that have no business touching a
+// value. The exit code alone answers the question.
+func Has(mainRoot, key string) error {
+	if err := Available(); err != nil {
+		return err
+	}
+	// No -w: security prints the metadata and never the password.
+	err := exec.Command("security", "find-generic-password",
+		"-s", service, "-a", Account(mainRoot, key)).Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 44 {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("keychain: %s", oneLine(err, exit))
 	}
 	return nil
 }
@@ -126,9 +159,18 @@ func Delete(mainRoot, key string) error {
 // to suspect the vault. Every missing key is named at once, because finding out
 // about them one re-run at a time is its own small hell.
 func Resolve(mainRoot string, vars map[string]string) (map[string]string, error) {
-	refs := Refs(vars)
+	// A value that opens with the prefix but is not a legal reference is refused
+	// before anything else. Passing it through as a literal would hand a child
+	// the string "th:v2:STRIPE_SECRET" as its secret — failing open on the one
+	// field in the file that is load-bearing for secrets.
+	if malformed := envfile.MalformedRefs(vars); len(malformed) > 0 {
+		return nil, fmt.Errorf("%s: not a vault reference this treehouse understands (expected %s<NAME>) — upgrade treehouse, or fix the value",
+			strings.Join(malformed, ", "), envfile.RefPrefix)
+	}
+
+	refs := envfile.Refs(vars)
 	if len(refs) == 0 {
-		return nil, nil // nothing referenced: the keychain is never asked
+		return nil, nil // nothing referenced: the store is never asked
 	}
 	if err := Available(); err != nil {
 		return nil, fmt.Errorf("this .env references the vault, but %w", err)
@@ -141,9 +183,11 @@ func Resolve(mainRoot string, vars map[string]string) (map[string]string, error)
 		case err == nil:
 			resolved[key] = val
 		case errors.Is(err, ErrNotFound):
-			missing = append(missing, name)
+			// The KEY, not the name: it is what the user types into
+			// `th vault add`, and with ALIAS=th:shared the two differ.
+			missing = append(missing, key)
 		default:
-			failed = append(failed, fmt.Sprintf("%s (%v)", name, err))
+			failed = append(failed, fmt.Sprintf("%s (%v)", key, err))
 		}
 	}
 	sort.Strings(missing)
@@ -153,14 +197,28 @@ func Resolve(mainRoot string, vars map[string]string) (map[string]string, error)
 	case len(failed) > 0:
 		return nil, fmt.Errorf("could not read %s from the keychain", strings.Join(failed, ", "))
 	case len(missing) > 0:
-		return nil, fmt.Errorf("%s: no such secret in the vault — `th vault add %s` to store it",
-			strings.Join(missing, ", "), missing[0])
+		return nil, fmt.Errorf("%s: no such secret in the vault — `th vault add %s` to store it%s",
+			strings.Join(missing, ", "), missing[0], movedHint)
 	}
 	return resolved, nil
 }
 
+// movedHint is the other half of the not-found story, and it matters because
+// this feature took the value out of .env: the user being told to re-add a
+// secret usually does not have one to re-add. Entries are keyed by the main
+// worktree's PATH, so moving or renaming the repo directory makes every one of
+// them unreachable while they are all still sitting there.
+const movedHint = " (if this repo moved, the value is still in Keychain Access under `treehouse: <KEY>`)"
+
 // decode reverses Set's encoding. A stored value that is not tagged was not
 // written by us, so it is returned as it stands.
+//
+// ponytail: that passthrough re-opens the hex hazard encTag exists to close,
+// for hand-filed entries only — `security` will have printed a tab-bearing
+// password as "7461620968657265" and we cannot tell that from a password that
+// looks like hex. Refusing hand-filed entries outright would be worse: reading
+// one somebody added in Keychain Access is the recovery path when a repo has
+// moved. Store through `th vault add` and the hazard cannot arise.
 func decode(stored string) (string, error) {
 	if !strings.HasPrefix(stored, encTag) {
 		return stored, nil

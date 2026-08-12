@@ -88,6 +88,14 @@ func runVaultAdd(cmd *cobra.Command, args []string) error {
 	if err := vault.Available(); err != nil {
 		return err
 	}
+	// Asked BEFORE the value moves, because the .env line is the only other copy.
+	// Storing under a name IsRef will later refuse leaves the secret unreachable
+	// and .env holding a pointer nothing resolves — `th vault ls` cannot see it,
+	// the child gets the literal "th:KEY" as its secret, and doctor reports it as
+	// cleartext and recommends running this command again.
+	if !envfile.ValidRefName(key) {
+		return fmt.Errorf("%s cannot be vaulted: a reference name is 1 to 64 characters of A-Z, a-z, 0-9 and _", key)
+	}
 
 	value, from, err := valueToStore(key, vars)
 	if err != nil {
@@ -100,10 +108,10 @@ func runVaultAdd(cmd *cobra.Command, args []string) error {
 	if err := vault.Set(mainRoot, key, value); err != nil {
 		return err
 	}
-	if err := envfile.Set(envPath, map[string]string{key: vault.Prefix + key}); err != nil {
+	if err := envfile.Set(envPath, map[string]string{key: envfile.RefPrefix + key}); err != nil {
 		return fmt.Errorf("%s is in the keychain, but .env still holds the value (%v) — fix .env by hand", key, err)
 	}
-	say("✓ %s: stored (%s), .env now reads %s%s\n", key, from, vault.Prefix, key)
+	say("✓ %s: stored (%s), .env now reads %s%s\n", key, from, envfile.RefPrefix, key)
 	say("  run commands as `th run -- <cmd>` so they still get the value\n")
 	return nil
 }
@@ -117,7 +125,27 @@ func runVaultAdd(cmd *cobra.Command, args []string) error {
 // nobody is going to satisfy.
 func valueToStore(key string, vars map[string]string) (value, from string, err error) {
 	current, declared := vars[key]
-	_, isRef := vault.IsRef(current)
+	_, isRef := envfile.IsRef(current)
+
+	// A pipe with something in it always wins. Preferring the file meant
+	// `printf new | th vault add KEY` stored the OLD value and never read stdin
+	// — a rotation that silently did not rotate. An EMPTY pipe is not a choice
+	// though: a scripted `th vault add KEY` inherits /dev/null, and that has to
+	// keep meaning "take it from .env".
+	if !isatty.IsTerminal(os.Stdin.Fd()) {
+		piped, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return "", "", err
+		}
+		// Read as given, minus one trailing newline: `echo` adds one, and a
+		// secret that genuinely ends in a newline is not expressible on a pipe.
+		if n := len(piped); n > 0 && piped[n-1] == '\n' {
+			piped = piped[:n-1]
+		}
+		if len(piped) > 0 {
+			return string(piped), "from stdin", nil
+		}
+	}
 
 	if declared && !isRef {
 		if current == "" {
@@ -125,27 +153,10 @@ func valueToStore(key string, vars map[string]string) (value, from string, err e
 		}
 		return current, "from .env", nil
 	}
-	if isatty.IsTerminal(os.Stdin.Fd()) {
-		switch {
-		case isRef:
-			return "", "", fmt.Errorf("%s is already vaulted — pipe a new value to rotate it: printf %%s '<value>' | th vault add %s", key, key)
-		default:
-			return "", "", fmt.Errorf("%s is not in .env — pipe the value in: printf %%s '<value>' | th vault add %s", key, key)
-		}
+	if isRef {
+		return "", "", fmt.Errorf("%s is already vaulted — pipe a new value to rotate it: printf %%s '<value>' | th vault add %s", key, key)
 	}
-	piped, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		return "", "", err
-	}
-	// Read as given, minus one trailing newline: `echo` adds one, and a secret
-	// that genuinely ends in a newline is not expressible on a pipe anyway.
-	if n := len(piped); n > 0 && piped[n-1] == '\n' {
-		piped = piped[:n-1]
-	}
-	if len(piped) == 0 {
-		return "", "", fmt.Errorf("nothing on stdin — there is no value to store for %s", key)
-	}
-	return string(piped), "from stdin", nil
+	return "", "", fmt.Errorf("%s is not in .env — pipe the value in: printf %%s '<value>' | th vault add %s", key, key)
 }
 
 func runVaultLs(cmd *cobra.Command, args []string) error {
@@ -153,7 +164,7 @@ func runVaultLs(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	refs := vault.Refs(vars)
+	refs := envfile.Refs(vars)
 	if len(refs) == 0 {
 		sayln("no vaulted keys in this worktree's .env — `th vault add <KEY>` to move one")
 		return nil
@@ -168,15 +179,16 @@ func runVaultLs(cmd *cobra.Command, args []string) error {
 	// would undo the whole command.
 	bad := false
 	for _, key := range keys {
-		switch _, err := vault.Get(mainRoot, refs[key]); {
+		// Has, not Get: `ls` prints names and status and must never hold a value.
+		switch err := vault.Has(mainRoot, refs[key]); {
 		case err == nil:
-			say("✓ %s → %s%s\n", key, vault.Prefix, refs[key])
+			say("✓ %s → %s%s\n", key, envfile.RefPrefix, refs[key])
 		case errors.Is(err, vault.ErrNotFound):
 			bad = true
-			say("✗ %s → %s%s: no such secret — `th vault add %s` to store it\n", key, vault.Prefix, refs[key], key)
+			say("✗ %s → %s%s: no such secret — `th vault add %s` to store it\n", key, envfile.RefPrefix, refs[key], key)
 		default:
 			bad = true
-			say("✗ %s → %s%s: %v\n", key, vault.Prefix, refs[key], oneLine(err))
+			say("✗ %s → %s%s: %v\n", key, envfile.RefPrefix, refs[key], oneLine(err))
 		}
 	}
 	if bad {
@@ -193,17 +205,63 @@ func runVaultRm(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := vault.Delete(mainRoot, key); err != nil {
+	// `ls` and `add` are indexed by .env KEY, so `rm` has to be too. Treating the
+	// argument as a keychain name meant `th vault rm ALIAS`, where .env reads
+	// ALIAS=th:shared, deleted an entry called ALIAS — which does not exist, and
+	// Delete treats "not there" as success — then printed a checkmark. Somebody
+	// rotating a compromised credential was told it was gone while it was still
+	// readable.
+	name := key
+	if n, ok := envfile.IsRef(vars[key]); ok {
+		name = n
+	}
+	if err := vault.Delete(mainRoot, name); err != nil {
 		return err
 	}
-	say("✓ %s: removed from the keychain\n", key)
+	say("✓ %s: removed from the keychain\n", name)
 
 	// Deliberately NOT rewriting .env: putting the value back would mean having
 	// kept a copy of it, which is the thing this command exists to avoid. So say
-	// the worktree is now broken rather than quietly leaving it that way.
-	if name, ok := vault.IsRef(vars[key]); ok && name == key {
-		say("! .env still reads %s=%s%s, so `th run` will refuse until you set a value or re-add it\n",
-			key, vault.Prefix, key)
+	// what is now broken rather than quietly leaving it that way.
+	for _, broken := range referrers(mainRoot, name, vars) {
+		say("! %s\n", broken)
 	}
 	return nil
+}
+
+// referrers names everything still pointing at a secret that was just deleted.
+//
+// The entry is repo-scoped, so the blast radius is every worktree, not the one
+// you are standing in — a sibling on another branch is broken by this command
+// and its owner was never told. `th rm` already refuses to drop work without
+// naming it; a command that breaks a secret owes the same.
+func referrers(mainRoot, name string, vars map[string]string) []string {
+	var out []string
+	for key, ref := range envfile.Refs(vars) {
+		if ref == name {
+			out = append(out, fmt.Sprintf(".env still reads %s=%s%s, so `th run` will refuse until you set a value or re-add it",
+				key, envfile.RefPrefix, name))
+		}
+	}
+
+	refs, err := check.Worktrees(mainRoot)
+	if err != nil {
+		return out
+	}
+	for _, ref := range refs {
+		if samePath(ref.Path, mainRoot) {
+			continue // counted above, via vars
+		}
+		wt, err := check.Discover(ref.Path)
+		if err != nil {
+			continue
+		}
+		for key, target := range envfile.Refs(wt.EnvVarsByDir()["."]) {
+			if target == name {
+				out = append(out, fmt.Sprintf("worktree %s also references it as %s — it is broken now too", ref.Branch, key))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }

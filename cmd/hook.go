@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/Blynkosaur/treehouse/internal/check"
-	"github.com/Blynkosaur/treehouse/internal/vault"
+	"github.com/Blynkosaur/treehouse/internal/envfile"
 	"github.com/spf13/cobra"
 )
 
@@ -41,7 +41,7 @@ func vaulted(root string) bool {
 	if err != nil {
 		return false
 	}
-	return len(vault.Refs(wt.EnvVarsByDir()["."])) > 0
+	return len(envfile.Refs(wt.EnvVarsByDir()["."])) > 0
 }
 
 func runHookSession(cmd *cobra.Command, args []string) error {
@@ -82,7 +82,7 @@ func sessionLines(findings []check.Finding, checks []check.Check, root string) [
 	room := 9 - len(tail) - 1
 
 	for _, f := range findings {
-		if len(lines) == room-2 {
+		if len(lines) == room-3 {
 			break // three services is enough to say "the env is broken"
 		}
 		if f.Drifted() {

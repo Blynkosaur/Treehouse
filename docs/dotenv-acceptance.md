@@ -147,7 +147,7 @@ Generates `.env.example` from each service's `.env`, keys copied, values blanked
 | 3 | Empty worktree → falls back to main's `.env` files, generates from those | `TestMake/fallback_to_main_worktree` |
 | 4 | No `.env` anywhere → honest "no .env files found" message, creates nothing | `TestMake/nothing_anywhere` |
 
-## `vault.IsRef(value)` — `internal/vault/ref.go`
+## `envfile.IsRef(value)` — `internal/envfile/ref.go`
 
 Decides whether a `.env` value is a pointer to a stored secret or the secret itself.
 
@@ -157,6 +157,8 @@ Decides whether a `.env` value is a pointer to a stored secret or the secret its
 | 2 | The match is **whole-value**: `postgres://user:th:pass@host/db` is a value, not a reference — a substring rule silently turns a password into a pointer | `TestIsRef` |
 | 3 | No minimum-length floor, because the anchor is the safety rule: `th:KEY` is an ordinary key name and must resolve | `TestIsRef` |
 | 4 | Bare `th:`, a name over 64 bytes, or any character outside `[A-Za-z0-9_]` is not a reference | `TestIsRef` |
+| 5 | A value that opens with the prefix but is not legal (`th:v2:KEY`) is **malformed**, never a literal — `.env` files travel, so failing open on an unknown shape hands a child the pointer as its secret | `TestMalformedRef`, `TestMalformedReferenceFailsClosed` |
+| 6 | `ValidRefName` is asked **before** `th vault add` moves a value, because the `.env` line is the only other copy | `TestValidRefName`, `TestVaultAddRefusesAnUnreferenceableName` |
 
 ## `vault` keychain — `internal/vault/keychain.go`
 
@@ -179,6 +181,8 @@ Decides whether a `.env` value is a pointer to a stored secret or the secret its
 | 4 | A tail with no trailing newline arrives on `Flush`, not silently dropped | `TestRedactor` |
 | 5 | Nothing to hide returns the writer **unwrapped**; a one-byte secret is not a rule | `TestRedactor` |
 | 6 | `Write` always returns the caller's own count — a short count is `io.MultiWriter`'s `ErrShortWrite` | `TestRedactor` |
+| 7 | Output with **no newline at all** still streams: only `maxLen-1` bytes are ever held back, so a `\r` progress bar does not sit in the buffer for the whole run | `TestRedactor/output_with_no_newline_still_streams` |
+| 8 | Scrubbing happens **before** the cut is chosen, so a secret arriving one byte at a time is still replaced whole | `TestRedactor/a_secret_split_one_byte_at_a_time…` |
 
 ## `th run` — `cmd/run.go`
 
@@ -191,6 +195,8 @@ Decides whether a `.env` value is a pointer to a stored secret or the secret its
 | 5 | The child's own flags are its own — cobra does not eat `-q` | `TestRunIsATransparentWrapper` |
 | 6 | stdout and stderr stay apart, and an unterminated tail still arrives | `TestRunIsATransparentWrapper` |
 | 7 | A dangling reference exits non-zero **and the child never starts** | `TestRunRefusesADanglingReference` |
+| 8 | The failure verdict is scrubbed too. It is built from the RAW tee — `MatchSignature` returns the matched output LINE — so printing it past the redactor leaked the secret on the commonest trigger there is, a failed command | `TestRunDoesNotLeakThroughItsOwnVerdict` |
+| 9 | A reference that resolved to nothing is **dropped** from the child's env, never passed through as `th:KEY`: an unset key produces a failure `missing-env` already explains | `TestCheckEnvDropsUnresolved` |
 
 ## `th vault` — `cmd/vault.go`
 
@@ -198,6 +204,8 @@ Decides whether a `.env` value is a pointer to a stored secret or the secret its
 |---|-----------|------|
 | 1 | `ls` prints key names and status, **never a value**; exits 2 on a dangling reference with the fix line | `TestVaultLsNeverPrintsValues` |
 | 2 | `add` reads a piped value for a key `.env` never declared, and for rotating one already vaulted | `TestVaultAddFromStdin` |
+| 3 | A pipe with data **wins** over a literal still in `.env`; an empty pipe (a scripted run inheriting `/dev/null`) still means "take it from `.env`" | `TestVaultAddFromStdin` |
+| 4 | `rm` resolves the keychain name through `.env` like `ls` does, so `th vault rm ALIAS` deletes what `ALIAS` points at rather than confirming a deletion it did not perform | `TestVaultRmResolvesThroughEnv` |
 
 ## `CheckSecrets` — `internal/check/secrets.go`
 
@@ -207,6 +215,7 @@ Decides whether a `.env` value is a pointer to a stored secret or the secret its
 | 2 | A key in `[secrets] keys` in cleartext → **fail**, whatever its name looks like | `TestCheckSecrets` |
 | 3 | A reference resolving to nothing → **fail**, naming `th vault add <KEY>` | `TestCheckSecrets` |
 | 4 | A resolvable reference, an empty value, or nothing secret-looking → **no rows at all** | `TestCheckSecrets` |
+| 4a | No keychain on this machine → one `vault: **skip**` row, never silence. Permanent and knowable is not the same as a locked keychain, which stays silent | `TestDoctorDistinguishesGoneFromUnaskable` |
 | 5 | No row ever contains a value | `TestCheckSecrets` |
 | 6 | The heuristic does not fire on `PORT`, `DATABASE_URL`, `KEYCLOAK_HOST` — a false alarm in every repo is how a report stops being read | `TestLooksSecret` |
 
@@ -236,14 +245,19 @@ inside the worktree's own database, so a dataset loaded by hand outside
 treehouse is invisible to doctor; `[database] psql` is split on whitespace, so a
 prefix argument containing a space cannot be expressed.
 
-The vault's ceilings, on purpose: `security -w` puts the value on argv, so it is
+The vault's ceilings, on purpose: existence is asked with `Has` (no `-w`) so
+doctor never pulls a plaintext it does not need; `security -w` puts the value on argv, so it is
 visible to `ps` for the few milliseconds the call takes (security(1) cannot read
 it from stdin, and the upgrade path is a new dependency bought for a window in
 which an attacker could already read the `.env` the value came from); redaction
-is line-buffered, so a value containing a newline survives the boundary;
+holds back only `maxLen-1` bytes, so output shorter than that with no newline (a
+bare `Password:` prompt) waits for `Flush`;
 `th run` injects the **root** `.env` only, the same ceiling `runIn` already had;
-and a reference name is always the key name, with no aliasing, so two keys
-needing one value are stored twice.
+a reference name defaults to the key name, with no command to create an alias,
+though a hand-written `ALIAS=th:shared` resolves and `rm` follows it; and
+keychain entries outlive the repo — moving the repo directory makes every one
+unreachable, and `th gc` cannot enumerate them, so the not-found message names
+Keychain Access as the way back.
 
 CR-only (classic-Mac) line endings are **deliberately** not handled: `Parse`
 can't read that format either, so the two sides are self-consistent, and

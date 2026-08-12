@@ -12,6 +12,7 @@ import (
 
 	"github.com/Blynkosaur/treehouse/internal/check"
 	"github.com/Blynkosaur/treehouse/internal/config"
+	"github.com/Blynkosaur/treehouse/internal/envfile"
 	"github.com/Blynkosaur/treehouse/internal/pg"
 	"github.com/Blynkosaur/treehouse/internal/vault"
 	"github.com/charmbracelet/lipgloss"
@@ -279,15 +280,46 @@ func addedMigrations(root, mainBranch, dir string) int {
 // references actually resolve. Beside CheckServices/DialServices, and for the
 // same reason — the judgment stays pure and testable, the I/O stays here.
 //
-// A keychain that will not answer at all reports nothing rather than calling
-// every reference dangling. "Nobody could ask" is not "the secret is gone", and
-// a FAIL row on every vaulted key because the keychain was locked is exactly
-// the kind of confident wrong verdict this report is built to avoid.
+// Two failures that look alike and are not:
+//
+// A keychain that will not ANSWER — locked, or refusing — reports nothing rather
+// than calling every reference dangling. "Nobody could ask" is not "the secret
+// is gone", and a FAIL row on every vaulted key because a dialog was dismissed
+// is the confident wrong verdict this report exists to avoid.
+//
+// A machine with no keychain AT ALL is the opposite: permanent, knowable, and
+// cheap to name. Without this row a Linux checkout of a vaulted repo is born
+// unable to run anything and doctor says nothing — the exact silent gap `skip`
+// was invented for. `th new` copies the references verbatim, by design, so this
+// is a state real fleets reach.
 func secretChecks(d check.Doctor, wt check.Worktree, mainRoot string) []check.Check {
 	vars := wt.EnvVarsByDir()["."]
+	if bad := envfile.MalformedRefs(vars); len(bad) > 0 {
+		return []check.Check{{
+			Name:   "vault",
+			Status: "fail",
+			Detail: strings.Join(bad, ", ") + ": not a vault reference this treehouse understands",
+			Fix:    "upgrade treehouse, or fix the value in .env",
+		}}
+	}
+	refs := envfile.Refs(vars)
+	if len(refs) > 0 {
+		if err := vault.Available(); err != nil {
+			return []check.Check{{
+				Name:   "vault",
+				Status: "skip",
+				Detail: fmt.Sprintf("this .env references the vault (%s), but %v", keyList(refs), oneLine(err)),
+				Fix:    "run this worktree on macOS, or replace the th: references with values",
+			}}
+		}
+	}
+
 	var dangling []string
-	for key, name := range vault.Refs(vars) {
-		if _, err := vault.Get(mainRoot, name); errors.Is(err, vault.ErrNotFound) {
+	for key, name := range refs {
+		// Has, not Get: existence is the whole question, and diagnose is reached
+		// from ls, new, why, hook session and triage. Get would pull every
+		// secret's cleartext into a process whose entire job is not to have it.
+		if err := vault.Has(mainRoot, name); errors.Is(err, vault.ErrNotFound) {
 			dangling = append(dangling, key)
 		}
 	}
@@ -297,11 +329,19 @@ func secretChecks(d check.Doctor, wt check.Worktree, mainRoot string) []check.Ch
 // runIn runs one of the project's own commands in dir, with this worktree's
 // root .env in the environment. check.Env is the one builder — see the ceiling
 // documented there.
+//
+// The output is SCRUBBED before it is returned, because once treehouse resolves
+// a secret into a child, that child's output is treehouse's problem: it lands in
+// a migration check's Detail, in --json, in the SessionStart context handed to
+// the agent, and in `th seed`'s error. One guard here covers every caller, which
+// is cheaper and safer than remembering at each of them.
 func runIn(dir string, wt check.Worktree, command string) ([]byte, error) {
+	resolved := resolveVault(wt)
 	c := exec.Command("sh", "-c", command)
 	c.Dir = dir
-	c.Env = check.Env(wt, resolveVault(wt))
-	return c.CombinedOutput()
+	c.Env = check.Env(wt, resolved)
+	out, err := c.CombinedOutput()
+	return []byte(vault.Scrub(string(out), resolved)), err
 }
 
 func seedName(s check.Seed) string { return s.Name }

@@ -154,6 +154,13 @@ func (w Worktree) EnvVarsByDir() map[string]map[string]string {
 // .env value is a pointer rather than the secret. Nil when nothing is vaulted,
 // which is the common case and costs nothing.
 //
+// A reference that resolved to NOTHING is dropped, never passed through. Handing
+// a child POSTGRES_PASSWORD=th:POSTGRES_PASSWORD produces "password
+// authentication failed", which names nothing and points at nothing; leaving the
+// key unset produces "environment variable POSTGRES_PASSWORD is not set", which
+// the missing-env signature already recognises — so the failure routes itself
+// into the machinery built to explain it.
+//
 // ponytail: the root .env only. A monorepo whose tooling lives in a subdirectory
 // with its own .env gets os.Environ and its own dotenv loading, same as today.
 func Env(wt Worktree, resolved map[string]string) []string {
@@ -161,6 +168,8 @@ func Env(wt Worktree, resolved map[string]string) []string {
 	for key, val := range wt.EnvVarsByDir()["."] {
 		if secret, ok := resolved[key]; ok {
 			val = secret
+		} else if _, isRef := envfile.IsRef(val); isRef {
+			continue
 		}
 		env = append(env, key+"="+val)
 	}
