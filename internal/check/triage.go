@@ -27,6 +27,7 @@ const (
 	needsDB        = "db"
 	needsMigration = "migration"
 	needsService   = "service"
+	needsVault     = "vault"
 )
 
 // DefaultSignatures are the zero-config built-ins, one per failure in B1's AC.
@@ -34,6 +35,22 @@ const (
 // signature, because the verdict it produces is confident.
 func DefaultSignatures() []Signature {
 	return []Signature{
+		{
+			Name: "unresolved-secret",
+			// The app was handed th:STRIPE_SECRET where a secret belonged, which
+			// happens exactly one way: the command did not go through `th run`.
+			// Shaped like the env key a reference is named after — the same
+			// discipline missing-env uses to stay off an ordinary dict KeyError,
+			// and what keeps this off a URL that merely starts with "th:".
+			//
+			// First in the list because it is the most specific thing here. A
+			// program handed a pointer instead of a password usually ALSO prints
+			// `connection refused`, and that would be the less useful answer.
+			Match: `th:[A-Z][A-Z0-9_]{2,}`,
+			Cause: "a vaulted secret reached the program as a reference, not a value — this command did not go through `th run`",
+			Fix:   "re-run it as `th run -- <cmd>`",
+			Needs: needsVault,
+		},
 		{
 			Name:  "connection-refused",
 			Match: `(?i)connection refused|ECONNREFUSED|could not connect to server`,
@@ -187,7 +204,8 @@ func areas(findings []Finding, checks []Check) map[string]area {
 		needsMigration: {
 			detail: "doctor did not report on migrations (they need `th doctor --db` and a [migrations] status command)",
 		},
-		needsEnv: {detail: "doctor found no env files to compare"},
+		needsEnv:   {detail: "doctor found no env files to compare"},
+		needsVault: {detail: "this worktree does not use the vault"},
 	}
 
 	if len(findings) > 0 {
@@ -231,6 +249,24 @@ func areas(findings []Finding, checks []Check) map[string]area {
 			detail: c.Detail,
 			fix:    c.Fix,
 		}
+	}
+
+	// The vault is the one area where PRESENCE corroborates rather than redness.
+	// A `th:` reference in a program's output is only possible when this
+	// worktree has references at all, and only when the command bypassed
+	// `th run`. Doctor cannot observe the second half — but the signature that
+	// cites this area already did, so any vault row, healthy or not, confirms
+	// the diagnosis. A vault that is itself broken (dangling, or no keychain)
+	// corroborates just as well, which is why skip counts here too.
+	//
+	// Deliberately absent from areaOrder: a permanently-red fact would attach
+	// itself to every unrelated verdict in a vaulted worktree as a "possibly
+	// related" hint and a stray fix. It is reachable only by a signature that
+	// names it.
+	if _, ok := worst[needsVault]; ok {
+		a := out[needsVault]
+		a.known, a.red = true, true
+		out[needsVault] = a
 	}
 	return out
 }

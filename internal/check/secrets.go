@@ -46,13 +46,31 @@ func (d Doctor) CheckSecrets(vars map[string]string, dangling []string) []Check 
 	// A reference to a secret that is not there. FAIL, because every command
 	// that needs the key is going to refuse to start — and the file gives no
 	// hint, since a dangling reference looks exactly like a working one.
-	if len(dangling) > 0 {
+	refs := envfile.Refs(vars)
+	switch {
+	case len(dangling) > 0:
 		sort.Strings(dangling)
 		checks = append(checks, Check{
 			Name:   "vault",
 			Status: "fail",
 			Detail: fmt.Sprintf("%s in .env, but no such secret in the keychain", nList(dangling, "reference")),
 			Fix:    "th vault add " + dangling[0],
+		})
+	case len(refs) > 0:
+		// An `ok` row, and it earns its line twice over: it tells a reader the
+		// vault is in use here, and it is the fact `th triage` cites to explain
+		// a command that was run without `th run`. Without a row there is no
+		// area, and the verdict degrades to "unconfirmed" on the one failure
+		// that is conclusive on sight.
+		keys := make([]string, 0, len(refs))
+		for key := range refs {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		checks = append(checks, Check{
+			Name:   "vault",
+			Status: "ok",
+			Detail: fmt.Sprintf("%s vaulted — run commands that need them as `th run -- <cmd>`", nList(keys, "key")),
 		})
 	}
 
