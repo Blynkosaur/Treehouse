@@ -215,6 +215,7 @@ Decides whether a `.env` value is a pointer to a stored secret or the secret its
 | 2 | A key in `[secrets] keys` in cleartext → **fail**, whatever its name looks like | `TestCheckSecrets` |
 | 3 | A reference resolving to nothing → **fail**, naming `th vault add <KEY>` | `TestCheckSecrets` |
 | 4 | A resolvable reference, an empty value, or nothing secret-looking → **no rows at all** | `TestCheckSecrets` |
+| 4b | A healthy vault → an **`ok`** `vault` row, not silence: it is the fact `th triage` cites to explain a bypass, and without a row there is no area | `TestCheckSecrets`, `TestTriageUnresolvedSecret` |
 | 4a | No keychain on this machine → one `vault: **skip**` row, never silence. Permanent and knowable is not the same as a locked keychain, which stays silent | `TestDoctorDistinguishesGoneFromUnaskable` |
 | 5 | No row ever contains a value | `TestCheckSecrets` |
 | 6 | The heuristic does not fire on `PORT`, `DATABASE_URL`, `KEYCLOAK_HOST` — a false alarm in every repo is how a report stops being read | `TestLooksSecret` |
@@ -226,6 +227,19 @@ Decides whether a `.env` value is a pointer to a stored secret or the secret its
 | 1 | `EnvDB` returns `""` for a vaulted `POSTGRES_DB` — `Quote` accepts `th:POSTGRES_DB`, so nothing downstream would catch `CREATE DATABASE "th:POSTGRES_DB"` | `TestEnvDBNeverReturnsAReference` |
 | 2 | A vaulted `DATABASE_URL` beside a literal `POSTGRES_DB` still answers with the literal | `TestEnvDBNeverReturnsAReference` |
 | 3 | `repointDB` declines with a **skip reason**, never an error and never a write, when either key is a reference | `TestRepointRefusesAVaultedKey` |
+
+## `unresolved-secret` signature — `internal/check/triage.go`
+
+The bypass: a command run without `th run` gets the reference, and the app hands
+`th:STRIPE_SECRET` to Stripe. It used to verdict `code`.
+
+| # | Criterion | Test |
+|---|-----------|------|
+| 1 | A reference in the output of a vaulted worktree → `environment`, fix `th run -- <cmd>` | `TestTriageUnresolvedSecret` |
+| 2 | A vault that is broken or unaskable (`skip`) corroborates just as well — the reference reached the program either way | `TestTriageUnresolvedSecret` |
+| 3 | **No** vault in this repo → never `environment`; the string is somebody else's | `TestTriageUnresolvedSecret` |
+| 4 | It outranks `connection-refused`, which the same failure usually also produces | `TestTriageUnresolvedSecret` |
+| 5 | The vault fact is absent from `areaOrder`, so a vaulted worktree still answers `code` for a `TypeError` with no stray fixes | `TestTriageUnresolvedSecret` |
 
 ---
 

@@ -329,6 +329,37 @@ half of the database repoint may treat it as a name.
   lived, so it skips with a reason — never an error, the rule the exhausted-port
   case already follows.
 
+**S4. The bypass is explained, not just discouraged.** Nothing forces an agent
+through `th run`; the SessionStart line is a hint, and Epic S is honest that
+gating is walked around. The design assumed the failure would at least be
+legible. It was not: the app got the literal `th:STRIPE_SECRET`, and triage
+answered `code` — actively wrong, and it sends somebody to debug an SDK over an
+invocation mistake, with the natural repair being to paste the value back into
+`.env` and undo the feature.
+
+- ✅ **Done (2026-08-12).** One built-in signature, and a fourth area for it to
+  cite. **The vault is the one area where PRESENCE corroborates rather than
+  redness:** a `th:` string in a program's output is only possible when this
+  worktree has references AND the command bypassed `th run`. Doctor cannot see
+  the second half, but the signature that cites the area already did — so any
+  vault row, healthy or broken, confirms it. `skip` counts here for the same
+  reason, which is the one place in this codebase it does not read as "nobody
+  asked".
+- **It is deliberately absent from `areaOrder`.** A fact that is red in every
+  vaulted worktree would otherwise attach itself to every unrelated verdict as
+  a "possibly related" hint and a stray fix. It is reachable only by a signature
+  that names it, and there is a test asserting a vaulted worktree still answers
+  `code` for a `TypeError`.
+- **It outranks `connection-refused`**, which is why it is first in the list: a
+  program handed a pointer instead of a password usually also fails to connect,
+  and that would be the less useful of the two answers.
+- The match is shaped like the env key a reference is named after
+  (`th:[A-Z][A-Z0-9_]{2,}`), the same discipline that keeps `missing-env` off an
+  ordinary dict `KeyError` — and off a URL that merely starts with `th:`.
+- `CheckSecrets` gained an **`ok`** row for a healthy vault, where it used to
+  emit nothing. It earns the line twice: it tells a reader the vault is in use,
+  and without a row there is no area for triage to cite.
+
 **S3. Reporting.** `doctor` warns on an inferred secret in cleartext, fails on a
 curated one, and fails on a reference that resolves to nothing.
 

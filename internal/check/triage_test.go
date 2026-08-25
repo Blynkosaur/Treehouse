@@ -277,3 +277,73 @@ func TestTriageTrimsRunawayLines(t *testing.T) {
 		t.Errorf("evidence line is %d chars — one minified line would be the whole verdict", len(got.Evidence[0]))
 	}
 }
+
+// TestTriageUnresolvedSecret is the failure `th run` exists to prevent and
+// could not previously explain: an agent runs `npm start` directly, the app's
+// own dotenv reads .env, and the program is handed `th:STRIPE_SECRET` where a
+// secret belonged. Before this signature the verdict was `code` — actively
+// wrong, and it sends somebody to debug an SDK over an invocation mistake.
+func TestTriageUnresolvedSecret(t *testing.T) {
+	vaulted := []Check{{Name: "vault", Status: "ok", Detail: "1 key (STRIPE_SECRET) is vaulted"}}
+	out := `StripeInvalidRequestError: Invalid API Key provided: th:STRIPE_SECRET`
+
+	t.Run("a reference in the output, in a vaulted worktree", func(t *testing.T) {
+		v := Triage(out, nil, vaulted, DefaultSignatures())
+		if v.Cause != "environment" {
+			t.Fatalf("cause = %q, want environment:\n%v", v.Cause, v.Evidence)
+		}
+		if !containsSub(v.Fixes, "th run") {
+			t.Fatalf("no fix naming th run: %v", v.Fixes)
+		}
+	})
+
+	// A broken vault corroborates just as well as a healthy one — the reference
+	// reached the program either way, so skip counts here where it counts as
+	// unknown everywhere else.
+	t.Run("a vault that could not be checked still corroborates", func(t *testing.T) {
+		noKeychain := []Check{{Name: "vault", Status: skip, Detail: "not macOS"}}
+		if v := Triage(out, nil, noKeychain, DefaultSignatures()); v.Cause != "environment" {
+			t.Fatalf("cause = %q, want environment:\n%v", v.Cause, v.Evidence)
+		}
+	})
+
+	// No vault in this repo: the string is somebody else's, and a confident
+	// "environment" would be exactly the wrong answer.
+	t.Run("no vault here means the pattern proves nothing", func(t *testing.T) {
+		if v := Triage(out, nil, nil, DefaultSignatures()); v.Cause == "environment" {
+			t.Fatalf("cause = environment with no vault in the repo:\n%v", v.Evidence)
+		}
+	})
+
+	// It outranks connection-refused: a program handed a pointer instead of a
+	// password usually also fails to connect, and that is the less useful answer.
+	t.Run("it outranks the connection failure it causes", func(t *testing.T) {
+		both := "could not connect to server: postgres://u:th:DB_PASSWORD@h/d - connection refused"
+		v := Triage(both, nil, append(vaulted,
+			Check{Name: "service", Status: "fail", Detail: "nothing listening"}), DefaultSignatures())
+		if v.Signature != "unresolved-secret" {
+			t.Fatalf("signature = %q, want unresolved-secret", v.Signature)
+		}
+	})
+
+	// The vault fact must never attach itself to an unrelated verdict as a hint
+	// or a stray fix — it is red in every vaulted worktree by construction.
+	t.Run("a vaulted worktree does not colour unrelated verdicts", func(t *testing.T) {
+		v := Triage("TypeError: undefined is not a function", nil, vaulted, DefaultSignatures())
+		if v.Cause != "code" {
+			t.Fatalf("cause = %q, want code — the vault leaked into an unrelated verdict:\n%v", v.Cause, v.Evidence)
+		}
+		if len(v.Fixes) != 0 {
+			t.Fatalf("unrelated verdict carries fixes: %v", v.Fixes)
+		}
+	})
+}
+
+func containsSub(all []string, want string) bool {
+	for _, s := range all {
+		if strings.Contains(s, want) {
+			return true
+		}
+	}
+	return false
+}

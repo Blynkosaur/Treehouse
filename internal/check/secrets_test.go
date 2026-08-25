@@ -43,9 +43,12 @@ func TestCheckSecrets(t *testing.T) {
 		dangling: []string{"STRIPE_SECRET"},
 		want:     []string{"vault=fail"}, mentions: "th vault add STRIPE_SECRET",
 	}, {
-		name: "a vaulted key that resolves is not a row at all",
+		// An ok row, not silence, and it is load-bearing: `th triage` cites this
+		// fact to explain a command run without `th run`, and without a row
+		// there is no area to cite.
+		name: "a vaulted key that resolves is an ok row",
 		vars: map[string]string{"STRIPE_SECRET": "th:STRIPE_SECRET", "PORT": "3000"},
-		want: nil,
+		want: []string{"vault=ok"}, mentions: "th run",
 	}, {
 		// An empty value cannot leak, and CheckEnv already nags about it.
 		name: "an empty secret-looking key is CheckEnv's business, not ours",
@@ -61,6 +64,13 @@ func TestCheckSecrets(t *testing.T) {
 		vars:     map[string]string{"DB_PASSWORD": "hunter2", "API_TOKEN": "th:API_TOKEN"},
 		dangling: []string{"API_TOKEN"},
 		want:     []string{"vault=fail", "secrets=fail"},
+	}, {
+		// A dangling reference outranks the ok row: they are the same subject,
+		// and a worktree cannot be both.
+		name:     "a dangling reference replaces the ok row, never joins it",
+		vars:     map[string]string{"A": "th:A", "B": "th:B"},
+		dangling: []string{"A"},
+		want:     []string{"vault=fail"},
 	}} {
 		t.Run(c.name, func(t *testing.T) {
 			got := Doctor{Secrets: c.curated}.CheckSecrets(c.vars, c.dangling)

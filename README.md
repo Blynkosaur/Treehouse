@@ -155,6 +155,26 @@ ActiveRecord::ConnectionError: could not connect to
 
 `--no-redact` turns that off when the substitution mangles output you need.
 
+**Running a command the other way is caught, not silently broken.** Nothing forces
+an agent through `th run`, and a command that skips it gets the reference instead
+of the value — the app's own dotenv reads `STRIPE_SECRET=th:STRIPE_SECRET` and
+hands that string to Stripe. Triage recognises it on sight:
+
+```
+$ th triage -- npm start
+th triage: environment (matched unresolved-secret)
+  StripeInvalidRequestError: Invalid API Key provided: th:STRIPE_SECRET
+  a vaulted secret reached the program as a reference, not a value — this
+    command did not go through `th run`
+  doctor agrees: 1 key (STRIPE_SECRET) is vaulted
+  fix: re-run it as `th run -- <cmd>`
+```
+
+Wired as a `PostToolUse` hook (see [Claude Code hooks](#claude-code-hooks-verified-2026-07-27)),
+that explanation reaches the agent the moment it happens — which matters, because
+the natural repair for a stuck agent is to paste the real value back into `.env`
+and quietly undo the whole feature.
+
 `th doctor` reports both halves: a key whose *name* suggests a secret while it
 still holds a value is a **warning**, a key named in `[secrets] keys` is a
 **failure**, and a reference pointing at a secret that is not there is a
