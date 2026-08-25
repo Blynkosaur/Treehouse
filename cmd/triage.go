@@ -45,27 +45,47 @@ func runTriage(cmd *cobra.Command, args []string) error {
 	case triageStdin:
 		return triageFromStdin()
 	case len(args) > 0:
-		return triageWrap(args)
+		return wrapCommand("th triage", args, nil, os.Stdout, os.Stderr)
 	}
 	return errors.New("nothing to triage — use `th triage -- <cmd>`, `--stdin`, or `--hook`")
 }
 
-// triageWrap is the transparent-wrapper mode, and transparent is the whole
-// contract: the wrapped command's stdout and stderr stream live to ours (a test
-// run has to look like a test run), and its exit code becomes ours VERBATIM, so
-// `th triage -- pytest` still fails a Makefile exactly like `pytest` would.
-// time, env and nice all behave this way; a wrapper that swallowed the code
-// would be a wrapper nobody could put in front of anything.
+// wrapCommand is the transparent-wrapper contract, shared by `th triage -- <cmd>`
+// and `th run -- <cmd>`, and transparent is the whole contract: the wrapped
+// command's stdout and stderr stream live to ours (a test run has to look like a
+// test run), and its exit code becomes ours VERBATIM, so `th triage -- pytest`
+// still fails a Makefile exactly like `pytest` would. time, env and nice all
+// behave this way; a wrapper that swallowed the code would be a wrapper nobody
+// could put in front of anything.
 //
 // That deliberately overloads exitCode, whose 0/1/2 are otherwise a verdict
 // about the worktree — so the verdict goes to STDERR instead, where diagnostics
 // belong and where it cannot corrupt a piped stdout.
-func triageWrap(args []string) error {
+//
+// ONE wrapper, two doors. The two commands differ only in what they hand the
+// child (env) and where the streams go (out, errW); everything about exit codes,
+// signals and the failure verdict has to stay identical, and the way to
+// guarantee that is to have one copy of it.
+//
+// env nil inherits this process's environment, the os/exec default. out and
+// errW are where the child's streams are copied to — os.Stdout and os.Stderr
+// unless a caller is scrubbing them.
+//
+// EVERYTHING this function prints goes to errW, never to os.Stderr directly,
+// and that is load-bearing rather than tidy. The verdict is built from `tee`,
+// which holds the child's RAW bytes — MatchSignature hands back the matched
+// output LINE as its evidence, so a connection string in a failing command's
+// stderr comes back verbatim. Printed past the redactor it would put the secret
+// in front of the agent with a `th run:` prefix that reads as trustworthy tool
+// output, on the most common trigger there is: a command that failed. errW is
+// the gate; nothing here may route around it.
+func wrapCommand(name string, args, env []string, out, errW io.Writer) error {
 	c := exec.Command(args[0], args[1:]...)
 	c.Stdin = os.Stdin
+	c.Env = env
 	var tee tail
-	c.Stdout = io.MultiWriter(os.Stdout, &tee)
-	c.Stderr = io.MultiWriter(os.Stderr, &tee)
+	c.Stdout = io.MultiWriter(out, &tee)
+	c.Stderr = io.MultiWriter(errW, &tee)
 
 	err := c.Run()
 	if err == nil {
@@ -74,15 +94,15 @@ func triageWrap(args []string) error {
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) {
 		// Never started: not a failure of the command, a failure to find it.
-		fmt.Fprintf(os.Stderr, "th triage: %v\n", err)
+		fmt.Fprintf(errW, "%s: %v\n", name, err)
 		return exitCode(127) // the shell's own code for "command not found"
 	}
 
 	v, vErr := verdictFor("", tee.String())
 	if vErr != nil {
-		fmt.Fprintf(os.Stderr, "th triage: could not read doctor state: %v\n", oneLine(vErr))
+		fmt.Fprintf(errW, "%s: could not read doctor state: %v\n", name, oneLine(vErr))
 	} else {
-		fmt.Fprintln(os.Stderr, strings.Join(triageLines(v), "\n"))
+		fmt.Fprintln(errW, strings.Join(triageLines(name, v), "\n"))
 	}
 
 	code := exit.ExitCode()
@@ -204,7 +224,7 @@ func hookTriage() error {
 	// protocol is stdout-JSON plus exit 0; exit 2 is the legacy blocking shape
 	// and may read as a blocked tool call. Blocking an agent's tool call because
 	// its environment looks broken is far worse than failing to hint at it.
-	return emitContext("PostToolUse", strings.Join(triageLines(v), "\n"))
+	return emitContext("PostToolUse", strings.Join(triageLines("th triage", v), "\n"))
 }
 
 // triageExit is --stdin's contract, and only --stdin's: 2 when the environment
@@ -298,8 +318,8 @@ func hookRoot(cwd string) (string, error) {
 //
 // Hard-capped at ten lines. A verdict that scrolls is a verdict nobody reads,
 // and in a hook every line is context window spent on a guess.
-func triageLines(v check.TriageVerdict) []string {
-	head := "th triage: " + v.Cause
+func triageLines(name string, v check.TriageVerdict) []string {
+	head := name + ": " + v.Cause
 	if v.Signature != "" {
 		head += " (matched " + v.Signature + ")"
 	}

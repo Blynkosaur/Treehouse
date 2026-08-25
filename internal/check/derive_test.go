@@ -820,3 +820,83 @@ func readEnvFile(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// TestRepointRefusesAVaultedKey: a th: reference is a POINTER to a secret, and
+// a derived literal written over it orphans the keychain entry and destroys the
+// only record of where the value lived. A skip, never an error — hydrate does
+// not abort over a derived value, the same rule the exhausted-port case follows.
+func TestRepointRefusesAVaultedKey(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		vars map[string]string
+	}{
+		{"POSTGRES_DB is vaulted", map[string]string{"POSTGRES_DB": "th:POSTGRES_DB"}},
+		{"DATABASE_URL is vaulted", map[string]string{"DATABASE_URL": "th:DATABASE_URL"}},
+		{"both are vaulted", map[string]string{
+			"DATABASE_URL": "th:DATABASE_URL", "POSTGRES_DB": "th:POSTGRES_DB"}},
+		{"one vaulted beside one literal", map[string]string{
+			"DATABASE_URL": "postgres://localhost/app_dev", "POSTGRES_DB": "th:POSTGRES_DB"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			add, _, skip := repointDB(c.vars, "app_wt_feat")
+			if add != nil {
+				t.Fatalf("repointDB wrote %v over a vault reference — the secret is now unreachable", add)
+			}
+			if skip == "" {
+				t.Fatal("repointDB declined silently; a worktree left on the shared database has to say so")
+			}
+		})
+	}
+}
+
+// TestEnvDBNeverReturnsAReference is the reader's half of the same guard. Quote
+// accepts "th:POSTGRES_DB" happily, so without this the cluster is asked to
+// CREATE DATABASE "th:POSTGRES_DB" and gc, seed and the shared-database check
+// all reason about a database nobody has.
+func TestEnvDBNeverReturnsAReference(t *testing.T) {
+	wt := func(vars map[string]string) Worktree {
+		return Worktree{Root: "/main", EnvFiles: []envfile.File{{Path: "/main/.env", Vars: vars}}}
+	}
+	if got := EnvDB(wt(map[string]string{"POSTGRES_DB": "th:POSTGRES_DB"})); got != "" {
+		t.Fatalf("EnvDB returned %q — a pointer, about to be used as a database name", got)
+	}
+	// A vaulted URL beside a real POSTGRES_DB still answers with the real one:
+	// DBFromURL already declines a th: value, and the fallback is the point.
+	if got := EnvDB(wt(map[string]string{
+		"DATABASE_URL": "th:DATABASE_URL", "POSTGRES_DB": "appdb"})); got != "appdb" {
+		t.Fatalf("EnvDB = %q, want the literal POSTGRES_DB beside a vaulted URL", got)
+	}
+	// And nothing vaulted is unchanged.
+	if got := EnvDB(wt(map[string]string{"DATABASE_URL": "postgres://localhost/app_dev"})); got != "app_dev" {
+		t.Fatalf("EnvDB = %q, want app_dev", got)
+	}
+}
+
+// TestCheckEnvDropsUnresolved: a reference nothing resolved must be DROPPED, not
+// handed to the child as the literal "th:KEY". A child given
+// POSTGRES_PASSWORD=th:POSTGRES_PASSWORD fails with "password authentication
+// failed", which names nothing; unset, it fails with "environment variable
+// POSTGRES_PASSWORD is not set", which the missing-env signature already
+// explains.
+func TestCheckEnvDropsUnresolved(t *testing.T) {
+	wt := Worktree{Root: "/main", EnvFiles: []envfile.File{{Path: "/main/.env", Vars: map[string]string{
+		"PORT":     "3000",
+		"RESOLVED": "th:RESOLVED",
+		"DANGLING": "th:DANGLING",
+	}}}}
+	got := map[string]bool{}
+	for _, kv := range Env(wt, map[string]string{"RESOLVED": "the-real-value"}) {
+		got[kv] = true
+	}
+	if !got["PORT=3000"] {
+		t.Fatal("a literal was not passed through")
+	}
+	if !got["RESOLVED=the-real-value"] {
+		t.Fatal("a resolved reference was not substituted")
+	}
+	for kv := range got {
+		if strings.HasPrefix(kv, "DANGLING=") {
+			t.Fatalf("an unresolved reference reached the child as %q", kv)
+		}
+	}
+}

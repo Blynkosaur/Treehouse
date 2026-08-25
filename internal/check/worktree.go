@@ -141,6 +141,41 @@ func (w Worktree) EnvVarsByDir() map[string]map[string]string {
 	return byDir
 }
 
+// Env is the environment one of the project's own commands runs in: this
+// process's environment with the worktree's ROOT .env overlaid on top. Later
+// entries win in os/exec, so .env is the override and the ambient shell is the
+// default — that is what makes `alembic current` answer about THIS worktree's
+// clone rather than whatever the shell happened to export.
+//
+// One builder for every caller, so `th run`, the migration-status command and
+// `th seed` cannot disagree about what a project command is handed.
+//
+// resolved replaces the value of the keys it names — the vault references, whose
+// .env value is a pointer rather than the secret. Nil when nothing is vaulted,
+// which is the common case and costs nothing.
+//
+// A reference that resolved to NOTHING is dropped, never passed through. Handing
+// a child POSTGRES_PASSWORD=th:POSTGRES_PASSWORD produces "password
+// authentication failed", which names nothing and points at nothing; leaving the
+// key unset produces "environment variable POSTGRES_PASSWORD is not set", which
+// the missing-env signature already recognises — so the failure routes itself
+// into the machinery built to explain it.
+//
+// ponytail: the root .env only. A monorepo whose tooling lives in a subdirectory
+// with its own .env gets os.Environ and its own dotenv loading, same as today.
+func Env(wt Worktree, resolved map[string]string) []string {
+	env := os.Environ()
+	for key, val := range wt.EnvVarsByDir()["."] {
+		if secret, ok := resolved[key]; ok {
+			val = secret
+		} else if _, isRef := envfile.IsRef(val); isRef {
+			continue
+		}
+		env = append(env, key+"="+val)
+	}
+	return env
+}
+
 // ComposeProjects names the compose projects this worktree owns: the
 // COMPOSE_PROJECT_NAME E2 wrote into its .env files, minus every name the main
 // checkout also claims.

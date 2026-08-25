@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/Blynkosaur/treehouse/internal/envfile"
 )
 
 // Quote renders name as a Postgres quoted identifier: wrapped in double quotes,
@@ -115,6 +117,18 @@ func EnvDB(w Worktree) string {
 	vars := w.EnvVarsByDir()["."]
 	if db, ok := DBFromURL(vars["DATABASE_URL"]); ok {
 		return db
+	}
+	// A vaulted key holds a POINTER, not a name. Returning it would send
+	// CREATE DATABASE "th:POSTGRES_DB" to the cluster — Quote accepts it, so
+	// nothing downstream would catch it — and would make gc, seed and the
+	// shared-database guard all reason about a database nobody has.
+	//
+	// Empty is the honest answer and an already-handled one: it is what a repo
+	// declaring no database says, and it means nothing is created and psql is
+	// never asked. This is the one guard for every reader of "which database";
+	// the writer's half is repointDB.
+	if _, isRef := envfile.IsRef(vars["POSTGRES_DB"]); isRef {
+		return ""
 	}
 	return vars["POSTGRES_DB"]
 }

@@ -34,13 +34,13 @@ Documented worktree pains (research + Bryan's own usage history) and the story t
 
 ---
 
-## Build status — 2026-07-26
+## Build status — 2026-08-11
 
-Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`, `gc`, `seed`, `path`, `triage`, `hook session`, `tui` (and bare `th`, which opens the dashboard on a terminal). (`th` is an alias for the `treehouse` binary.)
+Commands shipped: `doctor`, `hydrate`, `make`, `init`, `new`, `ls`, `rm`, `gc`, `seed`, `path`, `triage`, `run`, `vault`, `hook session`, `tui` (and bare `th`, which opens the dashboard on a terminal). (`th` is an alias for the `treehouse` binary.)
 
 | Status | Stories |
 | --- | --- |
-| ✅ **Done** | **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **A6** (redis logical db), **L1** (`new`, `open` hook included), **L2** (`ls`), **L3** (`rm`, database and compose teardown included), **L4** (`th path` + the documented shell function), **B1** (`triage`, three modes, `connection refused` corroborated), **B3** (`th why`), **C4** (`SessionStart` hook — verified firing 2026-07-27), **C2** (doctor, dead-service and stale-base checks included), **T1** (live TUI dashboard) |
+| ✅ **Done** | **S1–S3** (`th run`, `th vault`, the two A2 guards, the secrets checks), **E1** (instant deps), **C1** (hydrate fills `.env`), **E2** (compose namespace), **E3** (port offsets), **A1** (db clone), **A2** (`.env` points at it, doctor fails when it doesn't), **A4** (named re-seed), **A5** (`gc`), **A6** (redis logical db), **L1** (`new`, `open` hook included), **L2** (`ls`), **L3** (`rm`, database and compose teardown included), **L4** (`th path` + the documented shell function), **B1** (`triage`, three modes, `connection refused` corroborated), **B3** (`th why`), **C4** (`SessionStart` hook — verified firing 2026-07-27), **C2** (doctor, dead-service and stale-base checks included), **T1** (live TUI dashboard) |
 | 🟡 **Partial** | **A3** (migration state, with `diverged` cut from the AC — see below), **B2** (built and wired, but Claude Code fires no hook on a *failed* Bash call — verified 2026-07-27; the wrapper `th triage -- <cmd>` covers the case the hook cannot reach) |
 | ✂️ **Cut** | **C5**'s `.env.example`/compose scan (inference is live; a generated copy goes stale and wins), **C3** (`snapshot` — `make` is the same command with a different filename) |
 
@@ -182,7 +182,7 @@ Foundations in place that unblock the above: `Discover`, `MainWorktree`, `Worktr
   **The stale-base check reuses `gitBehind`** (now exported as `check.Behind`) rather than shelling git a second time, so doctor's `base` row and `th ls`'s BEHIND column can never disagree. **WARN, never FAIL:** a stale branch is a smell, the code still runs, and an exit 2 on a worktree that works is how a checker teaches people to stop reading it. Zero commits behind is an `ok` row, consistent with how the `db` check reports a healthy state — but **the main checkout gets no row at all**, and that is correctness rather than tidiness: the count is `HEAD..<main branch>`, which in main is always zero, so a row there would print "up to date" over a main that is ten commits behind origin. *ponytail:* the count is against the **local** main branch and doctor does not fetch, so a stale local main under-reports; the fix line fetches, and `th new` already does.
 
   **Why `Check` is a sibling of `Finding`, not a wider `Finding`:** a `Finding` is shaped around env keys (`Missing`/`Empty`/`NoEnv`/`Keys`). Database, migration and seed results share none of that shape, and widening the struct would give every env row a pile of nil db fields to carry and every consumer a pile to skip. So the envelope carries two flat lists — `{schema: 2, root, status, findings: […], checks: […]}` — each with its own shape. The version bumped because that is what the field is for: a consumer reading `findings` for the whole story is wrong now, and should be told at the envelope rather than by silently missing the database row.
-**C3.** `snapshot` captures the current working `.env` as canonical. ✂️ **Cut (2026-07-26).** `th make` already does this: it reads each service's live `.env` and writes the key set out to `.env.example`. `snapshot` is the same walk over the same files with a different output filename, and the only thing it would add is *values* — which is precisely what `make` blanks, because the file it writes is committed. A command that captures a working `.env` **with** its values is a secrets-writing command, and this project's non-goals say secrets go to varlock/Doppler. So: same command, or a bad idea. Neither is worth a subcommand.
+**C3.** `snapshot` captures the current working `.env` as canonical. ✂️ **Cut (2026-07-26).** `th make` already does this: it reads each service's live `.env` and writes the key set out to `.env.example`. `snapshot` is the same walk over the same files with a different output filename, and the only thing it would add is *values* — which is precisely what `make` blanks, because the file it writes is committed. A command that captures a working `.env` **with** its values is a secrets-writing command, and this project's non-goals say secrets go to varlock/Doppler. So: same command, or a bad idea. Neither is worth a subcommand. **(Epic S reopened the underlying question and answered it differently: the way to keep values safely is not to write them to a second file, it is to take them out of the first one. See S1.)**
 **C4.** `SessionStart` hook: agent starts with env state in context. 🟡 **Code done, wiring unverified** — `th hook session` emits this worktree's env and database state as `additionalContext`, capped at nine lines because it is prepended to a context window, not printed as a report. A green worktree costs one line plus a pointer to `th triage`, and a worktree whose checks could not be **run** says so rather than reading as green. It deliberately does **not** filter on the `source` value (`startup`/`resume`/`clear`/`compact`): which of those are worth spending context on is unverified, and the settings.json matcher is where a human can see and change that decision. See B2 for the rest of the unverified list.
 **C5.** `init` scans `.env.example` + docker-compose and generates `treehouse.toml`. ✂️ **Scan cut (2026-07-26); the scaffold stays.** `init` writes a commented `treehouse.toml` covering every table, now including `[[service]]` and `[open]`. What it will not do is bake the inferences into the file, and the reason is the same one that keeps `[database] template` out of the config: **inference already happens live, on every run.** Required keys are inferred from `.env.example`, services from the `PORT` keys, the database from main's own `.env` — all of it re-derived each time `doctor` runs, against the repo as it is *now*. Writing those inferences into a committed file creates a second source of truth that is correct on the day it is generated and wrong the first time somebody adds a service, and — worse — the stale copy would *win*, because `treehouse.toml` is the sharpener that overrides what was inferred. A generated `[[service]]` list is how a repo ends up failing doctor over a service it deleted six months ago. The scaffold is comments; comments cannot go stale into a verdict.
 
@@ -245,10 +245,111 @@ There is deliberately **no `[database] template`**: which database to clone is m
 
 Build-order consequence: env checker v1 reads `.env.example` directly; the config package moves later (arrives with data checks).
 
+## Epic S — Secrets an agent cannot read (2026-08-11)
+
+**S1. `th run` — the proxy.** As a Dev handing a worktree to an Agent, the agent
+can run anything that needs the environment without ever seeing a value in it.
+
+- AC: `th vault add <KEY>` moves the value to the keychain and leaves
+  `KEY=th:KEY` in `.env`; `th run -- <cmd>` resolves it into the child; the
+  wrapper stays transparent (streams live, exit code verbatim); output is
+  scrubbed; a dangling reference stops the command instead of starting it empty.
+- ✅ **Done (2026-08-11).** `th run` is `wrapCommand` with an environment, so it
+  inherits the exit-code contract rather than copying it, and `check.Env` is the
+  one env builder `th seed` and the migration-status command also use.
+
+**The threat model is accidental exposure, and the README says so plainly.** A
+`cat .env`, a `grep -r`, a stack trace, a file read into a context window to
+answer an unrelated question — the secret lands in a transcript permanently, for
+no benefit, because the agent never needed the *value*, it needed the command to
+work. What treehouse deliberately does **not** claim is a defence against a
+hostile process running as you: `/usr/bin/security` is the same binary for every
+caller. Enforcing more needs a container with locked-down egress, which is a
+different security boundary and one this project should not grow.
+
+**Prior art (Infisical Agent Vault, read 2026-08-11).** Same idea one layer up:
+their agent holds `__anthropic_api_key__` and a TLS-intercepting forward proxy
+swaps in the real key on outbound HTTP, matched by host. Three things transfer —
+the `run --` shape, dummy values standing in for secrets, and their own stated
+limitation that "`HTTPS_PROXY` alone is insufficient; the network must be locked
+down", which translates exactly to "`th run` alone is insufficient if the value
+is still in `.env`". That is the argument for references over gating, from the
+people who shipped the gating version.
+
+What does **not** transfer is the network layer: `DATABASE_URL` speaks the
+Postgres wire protocol and `REDIS_URL` speaks RESP, so an HTTP proxy cannot
+touch either, and half a `.env` is not a secret at all. Agent Vault intercepts
+the socket because its secret lives in the agent's process env; treehouse
+intercepts the `exec` because its secret lives in a file. Their `mitm`, `ca`,
+`netguard`, `oauth` and management UI are the wrong rung for a repo with no
+daemon. The two compose: `th run -- <cmd>` inside `agent-vault run -- claude`.
+
+**Why the placeholder goes in the file rather than gating access to it.**
+Gating (`th run` injects, a hook denies reading `.env`) is walked around with
+`python -c "open('.env')"`. With the value gone there is nothing to walk around
+to — and `hydrate` needed **zero changes**, because it copies `.env` values
+verbatim, so a reference copies as a reference and a new worktree is born
+already pointed at the vault.
+
+**Decisions worth keeping:**
+
+- The reference match is **whole-value**, never a substring: `th:` appears
+  inside `postgres://user:th:pass@host/db` and inside plenty of JWTs, and a
+  substring rule would silently treat a real password as a pointer. Anchoring is
+  also why there is no minimum-length floor — Agent Vault needs one because
+  their placeholders are substituted *into* strings, and a floor of 4 here would
+  misread `th:KEY`.
+- Identity is `<main worktree path>:<KEY>`, the scheme the Postgres provenance
+  comment already uses. **Repo-scoped, never branch-scoped**, so every worktree
+  resolves the same value and there is nothing for `th gc` to chase — the same
+  bargain E3's port registry and A4's seed marker make.
+- Stored bytes are tagged base64. `security find-generic-password -w` switches
+  to printing **hex** when the stored bytes are not all printable, with no flag
+  to stop it and no way to tell that hex from a password that looks like hex: a
+  value containing a tab round-tripped into a *different* value. Found by the
+  test, not by the design.
+- Redaction closes the leak the vault cannot: a program printing its own
+  connection string. Longest match first, because a password is usually a
+  substring of the `DATABASE_URL` embedding it. **Ceiling:** a value containing
+  a newline survives the line boundary, because buffering the whole stream would
+  stop output streaming, which is what a wrapper is for.
+- **`th vault rm` does not put the value back.** That would mean having kept a
+  copy. It says the worktree is now broken instead of quietly leaving it so.
+
+**S2. The two guards A2 needed.** A `th:` reference is a pointer, and neither
+half of the database repoint may treat it as a name.
+
+- ✅ **Done (2026-08-11).** `EnvDB` returned `vars["POSTGRES_DB"]`
+  unconditionally, so a vaulted key answered `th:POSTGRES_DB` to "which database
+  does this worktree use" — and `Quote` accepts that string, so the cluster
+  would have been asked to `CREATE DATABASE "th:POSTGRES_DB"` with nothing
+  downstream to catch it. One guard in the shared reader, not one per caller.
+  `repointDB` is the writer's half: a derived literal written over a reference
+  orphans the keychain entry and destroys the only record of where the value
+  lived, so it skips with a reason — never an error, the rule the exhausted-port
+  case already follows.
+
+**S3. Reporting.** `doctor` warns on an inferred secret in cleartext, fails on a
+curated one, and fails on a reference that resolves to nothing.
+
+- ✅ **Done (2026-08-11).** The same progressive-configuration tier the env and
+  service checks use: a name heuristic infers and warns, `[secrets] keys`
+  curates and fails. Nothing to say produces **no rows**, and a keychain that
+  will not answer at all reports nothing rather than calling every reference
+  dangling — "nobody could ask" is not "the secret is gone". The
+  false-alarm side is unit-tested, because a WARN that fires on `PORT` in every
+  repo is how a report teaches people to stop reading it.
+- The `SessionStart` hook gains the line that makes any of this reachable, but
+  **only in a worktree that has something vaulted**: an agent told to use
+  `th run` in a repo with nothing vaulted has been handed a rule with no reason.
+  The nine-line budget now reserves for it rather than overrunning.
+
+---
+
 ## Non-goals (state in README)
 
 - Multi-machine sync (the original "Dropbox for devs" — dead)
-- Secrets vaulting → varlock / Agent Vault / Doppler
+- Full secrets management → varlock / Agent Vault / Doppler / Infisical. **Narrowed 2026-08-11 (Epic S).** `th vault` covers exactly one thing those do not: keeping one laptop's `.env` values out of the files an agent reads. Team-wide rotation, sharing, audit logs and anything server-side stay out of scope, and the README says so.
 - Port proxying & subdomain routing → portree / dockportless
 - IDE/editor state management (pain 10)
 - Moving uncommitted WIP between worktrees (pain 11 — future `treehouse move`, not v1)

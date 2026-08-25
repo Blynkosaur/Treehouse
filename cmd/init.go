@@ -51,6 +51,13 @@ const treehouseTOML = `# treehouse.toml — shared, committed project config (li
 # [env]
 # required = ["DATABASE_URL"]
 
+# Keys that must never sit in .env in cleartext. A key whose NAME looks like a
+# secret (*_SECRET, *_TOKEN, *_KEY, *PASSWORD*, *CREDENTIAL*) is inferred and
+# warned about; listing it here makes doctor exit 2 until it is vaulted.
+# Move one with "th vault add <KEY>", then run commands as "th run -- <cmd>".
+# [secrets]
+# keys = ["STRIPE_SECRET"]
+
 # The database clone and the .env repoint need NO config: the template, the
 # connection and the clone name all come from main's own .env. Set this only if
 # your Postgres isn't reachable by a plain local psql.
