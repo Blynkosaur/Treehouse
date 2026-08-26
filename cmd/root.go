@@ -10,10 +10,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// version is stamped by the release build. A source build stays "dev", so
+// `th --version` never claims to be a release that nobody can download.
+var version = "dev"
+
 var rootCmd = &cobra.Command{
 	Use:     "th",
 	Short:   "Treehouse a Git Worktree manager to make your life easier",
 	Aliases: []string{"th"},
+	Version: version,
 	// A runtime failure is not a usage failure. Without this every error dumps
 	// the full help text into an agent's stdout, burying the actual message.
 	SilenceUsage: true,
