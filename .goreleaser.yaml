@@ -1,0 +1,51 @@
+version: 2
+
+project_name: treehouse
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: th
+    binary: th
+    main: .
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/Blynkosaur/treehouse/cmd.version={{.Version}}
+
+archives:
+  - id: th
+    # th-0.1.0-darwin-arm64.tar.gz — the name says which one to download.
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files: [LICENSE, README.md]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - Merge pull request
+
+release:
+  draft: false
+  footer: |
+    ## Install
+
+    ```sh
+    go install github.com/Blynkosaur/treehouse@latest
+    ```
+
+    Or download the archive for your platform above and put `th` on your PATH.
+
+    The vault (`th vault`, `th run`) needs the macOS keychain. Everything else
+    runs on Linux too.
